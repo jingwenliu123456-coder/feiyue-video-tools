@@ -1658,7 +1658,7 @@ class NamingToolApp:
                 self._set_size_ui(str(cfg.get("size_preset", "9x16")), str(cfg.get("size_custom", "")))
             else:
                 self._set_size_ui(str(cfg.get("size", "9x16")), "")
-            self.date_var.set(today_date_str())  # 始终跟系统今日，不沿用配置里的旧日期
+            self.date_var.set(cfg.get("date") or today_date_str())
             self._set_designer_ui(str(cfg.get("designer_preset", "ljw")), str(cfg.get("designer_custom", "")))
             tags = cfg.get("tags", ["", "", ""])
             for i, tv in enumerate(self.tag_vars):
@@ -1711,17 +1711,6 @@ class NamingToolApp:
         self._update_preset_combo()
         self._refresh_rename_lists()
         self._update_legacy_strip_visibility()
-
-    def sync_today_date(self) -> None:
-        """把日期框刷新为系统今日（嵌入页跨天/再次打开时用）。"""
-        today = today_date_str()
-        if (self.date_var.get() or "").strip() == today:
-            return
-        self.date_var.set(today)
-        try:
-            self._schedule_save()
-        except Exception:
-            pass
 
     def _start_index(self) -> int:
         try:

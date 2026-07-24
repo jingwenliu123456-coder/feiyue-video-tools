@@ -1,0 +1,5 @@
+Synced from Windows workspace for V22 macOS packaging.
+Time: 2026-07-24T10:25:51
+Includes: v20/v21/v22 + core/modules/ui + naming_tool
+Layer/endcard (浮层落版) comes from video_batch_tool_v21.apply_overlay_endcard.
+On Mac: ./setup_and_build_mac.sh

@@ -57,17 +57,10 @@ def list_videos_in_folder(folder: str | Path) -> list[Path]:
     folder = Path(folder)
     if not folder.is_dir():
         return []
-    out: list[Path] = []
-    for p in folder.iterdir():
-        if not p.is_file() or p.suffix.lower() not in VIDEO_EXTS:
-            continue
-        low = p.name.lower()
-        if low.startswith("temp_") or low.startswith("habi_preview"):
-            continue
-        if ".habi_part." in low:
-            continue
-        out.append(p)
-    return sorted(out)
+    return sorted(
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+    )
 
 
 def probe_video_size(ffprobe: str, path: Path) -> tuple[int, int]:
@@ -247,33 +240,18 @@ def probe_duration(ffprobe: str, path: Path) -> float:
 
 
 def extract_first_frame(ffmpeg: str, ffprobe: str, video_path: Path) -> Path:
-    """抽预览帧。不少成片第 0 帧是黑的（淡入），优先取 ~0.5s，失败再回退到 0。"""
     vw, vh = probe_video_size(ffprobe, video_path)
     ch = canvas_h(vw, vh)
     fd, thumb = tempfile.mkstemp(suffix=".jpg")
     import os
     os.close(fd)
     thumb_path = Path(thumb)
-
-    def _grab(ss: float) -> bool:
-        # -ss 放在 -i 之后：按解码时间定位，比前置 -ss 更稳
-        r = subprocess.run(
-            [
-                ffmpeg, "-y", "-i", str(video_path),
-                "-ss", f"{ss:.3f}", "-vframes", "1",
-                "-vf", f"scale={CANVAS_W}:{ch}", "-q:v", "2", str(thumb_path),
-            ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=_subprocess_flags(),
-        )
-        return r.returncode == 0 and thumb_path.is_file() and thumb_path.stat().st_size > 0
-
-    if not _grab(0.5) and not _grab(1.0) and not _grab(0.0):
-        try:
-            thumb_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-        raise RuntimeError(f"无法抽取预览帧: {video_path.name}")
+    subprocess.run(
+        [ffmpeg, "-y", "-i", str(video_path), "-ss", "0", "-vframes", "1",
+         "-vf", f"scale={CANVAS_W}:{ch}", "-q:v", "2", str(thumb_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=_subprocess_flags(), check=True,
+    )
     return thumb_path
 
 

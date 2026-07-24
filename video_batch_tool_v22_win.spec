@@ -1,16 +1,28 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Windows 打包配置：V22 版 + 内置 FFmpeg + 命名工具
-# 用法: pyinstaller video_batch_tool_v22_win.spec
+# Windows 打包配置：V22 → 飞跃视频工具 + 飞跃命名工具
+# 用法: py -3.13 -m PyInstaller video_batch_tool_v22_win.spec
+# 注意：必须用装了 ttkbootstrap 的 Python（推荐 3.13），否则界面会退回经典灰皮。
 
 import os
-import sys
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 PROJECT_DIR = SPECPATH
+
+# 发布名（exe 文件名）
+VIDEO_EXE_NAME = "飞跃视频工具"
+NAMING_EXE_NAME = "飞跃命名工具"
 
 
 def _exists(name: str) -> str:
     return os.path.join(PROJECT_DIR, name)
+
+
+def _first_icon(*names: str):
+    for name in names:
+        p = _exists(name)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def _optional_data(src_name: str, dest: str = "."):
@@ -37,25 +49,37 @@ def _ffmpeg_binaries():
     return out
 
 
-datas = []
+# ttkbootstrap：主题 JSON / 图标必须打进包，否则 Window(themename=...) 失败并退回经典 Tk
+try:
+    _tb_datas, _tb_binaries, _tb_hidden = collect_all("ttkbootstrap")
+except Exception:
+    _tb_datas, _tb_binaries, _tb_hidden = [], [], []
+
+datas = list(_tb_datas)
 for pair in (
+    _optional_data("video_icon.ico"),
+    _optional_data("video_icon.png"),
     _optional_data("app_icon.ico"),
     _optional_data("app_icon.png"),
     # 仅作默认模板打入包内，运行时配置写在 exe 同目录，不会覆盖同事已有配置
     _optional_data("naming_config.json", "defaults"),
     _optional_data("video_batch_config_v22.json", "defaults"),
+    _optional_data("video_batch_config_v21.json", "defaults"),
 ):
     datas.extend(pair)
 for pair in _optional_tree("assets", "assets"):
     datas.extend(pair)
 
-binaries = _ffmpeg_binaries()
+binaries = _ffmpeg_binaries() + list(_tb_binaries)
 
 hiddenimports = (
-    collect_submodules("PIL")
+    list(_tb_hidden)
+    + collect_submodules("ttkbootstrap")
+    + collect_submodules("PIL")
     + collect_submodules("core")
     + collect_submodules("ui")
     + [
+        "ttkbootstrap",
         "video_batch_tool_v20",
         "video_batch_tool_v21",
         "video_batch_tool_v22",
@@ -65,14 +89,19 @@ hiddenimports = (
         "modules.platform_utils",
         "modules.ui_skin",
         "modules.tool_stats",
+        "modules.theme_utils",
+        "modules.overlay_editor_safe",
         "core.overlay_engine",
         "core.overlay_processor",
         "core.watermark",
+        "core.ffmpeg_safe",
+        "core.preview_composer",
         "ui.overlay_module",
         "ui.preview_canvas",
         "ui.composite_canvas",
         "ui.timeline_canvas",
         "ui.annual_report_ui",
+        "ui.preview_zoom_dialog",
         "tkinter",
         "tkinter.ttk",
         "tkinter.filedialog",
@@ -83,7 +112,7 @@ hiddenimports = (
 
 block_cipher = None
 
-# ---------- 主程序：V22 视频批处理 ----------
+# ---------- 主程序：飞跃视频工具（V22） ----------
 a_main = Analysis(
     ["video_batch_tool_v22.py"],
     pathex=[PROJECT_DIR],
@@ -108,7 +137,7 @@ exe_main = EXE(
     a_main.binaries,
     a_main.datas,
     [],
-    name="HabiVideoTool",
+    name=VIDEO_EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -121,12 +150,14 @@ exe_main = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=_exists("app_icon.ico") if os.path.isfile(_exists("app_icon.ico")) else None,
+    icon=_first_icon("video_icon.ico", "app_icon.ico"),
 )
 
-# ---------- 命名工具（无 FFmpeg，体积小） ----------
-naming_datas = []
+# ---------- 飞跃命名工具（无 FFmpeg，体积小） ----------
+naming_datas = list(_tb_datas)
 for pair in (
+    _optional_data("naming_icon.ico"),
+    _optional_data("naming_icon.png"),
     _optional_data("app_icon.ico"),
     _optional_data("naming_config.json", "defaults"),
 ):
@@ -135,13 +166,15 @@ for pair in (
 a_naming = Analysis(
     ["naming_tool.py"],
     pathex=[PROJECT_DIR],
-    binaries=[],
+    binaries=list(_tb_binaries),
     datas=naming_datas,
-    hiddenimports=[
+    hiddenimports=list(_tb_hidden) + collect_submodules("ttkbootstrap") + [
+        "ttkbootstrap",
         "modules.naming_convention",
         "modules.output_naming",
         "modules.platform_utils",
         "modules.ui_skin",
+        "modules.theme_utils",
         "tkinter",
         "tkinter.ttk",
         "tkinter.filedialog",
@@ -166,7 +199,7 @@ exe_naming = EXE(
     a_naming.binaries,
     a_naming.datas,
     [],
-    name="HabiNamingTool",
+    name=NAMING_EXE_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -179,5 +212,5 @@ exe_naming = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=_exists("app_icon.ico") if os.path.isfile(_exists("app_icon.ico")) else None,
+    icon=_first_icon("naming_icon.ico", "app_icon.ico"),
 )

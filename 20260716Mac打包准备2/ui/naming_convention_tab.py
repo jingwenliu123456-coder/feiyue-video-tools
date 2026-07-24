@@ -457,7 +457,7 @@ class NamingConventionPanel(ttk.Frame):
         self.lang_combo.set(cfg.get("lang", "ar"))
         self.type_combo.set(cfg.get("type", "chat"))
         self.size_combo.set(cfg.get("size", "9x16"))
-        self.date_var.set(today_date_str())  # 始终跟系统今日，不沿用配置里的旧日期
+        self.date_var.set(cfg.get("date") or today_date_str())
         self._set_designer_ui(
             str(cfg.get("designer_preset", "ljw")),
             str(cfg.get("designer_custom", "")),

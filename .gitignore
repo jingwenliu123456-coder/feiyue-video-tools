@@ -29,6 +29,8 @@ ffmpeg_mac.zip
 naming_config.json
 video_batch_config_*.json
 annual_report_config.json
+v24_ui_prefs.json
+preferences.json
 tool_stats.db
 *.log
 crash_log.txt
@@ -53,3 +55,5 @@ desktop.ini
 /cd
 /python
 
+_tmp_pm_skills/
+.cursor/pm-skills-commands/
