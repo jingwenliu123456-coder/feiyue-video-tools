@@ -51,6 +51,7 @@ _FEATURE_SPECS: list[tuple[str, str, str]] = [
     ("layer", "浮层落版", "build_layer_section"),
     ("ending", "拼接落版", "build_ending_section"),
     ("overlay", "可视化叠加", "build_overlay_grid_section"),
+    ("subtitle", "字幕识别/翻译/烧录", "build_subtitle_section"),
 ]
 
 _FEATURE_PATH_REQ: dict[str, tuple[str, str]] = {
@@ -99,6 +100,15 @@ class VideoBatchToolV24(_V23):
         self._memory_applied = False
         self._user_pipeline_order: list[str] | None = None
         self._last_fission_out_root = ""
+        # 生产队列（页面级 UX：先做队列骨架与顺序执行）
+        self._job_queue: list[dict] = []
+        self._job_queue_running: bool = False
+        self._job_queue_next_id: int = 1
+
+        # 监视文件夹（Watch Folder）：默认仅提供「扫描并加入队列」与简单后台轮询
+        self._watch_monitor_running: bool = False
+        self._watch_seen_dirs: set[str] = set()
+        self._watch_poll_job: Any = None
         super().__init__(root)
         self._load_user_pipeline_order()
         try:
@@ -244,16 +254,136 @@ class VideoBatchToolV24(_V23):
         """优先裂变覆盖 → 用户自调顺序 → V22 布局顺序。"""
         ov = getattr(self, "_pipeline_order_override", None)
         if ov:
-            return list(ov)
+            ordered = list(ov)
+            if "subtitle" not in ordered:
+                ordered.append("subtitle")
+            return ordered
         user = getattr(self, "_user_pipeline_order", None)
         if isinstance(user, list) and user:
             defaults = list(VideoBatchToolV21._BATCH_PIPELINE_DEFAULT)
+            if "subtitle" not in defaults:
+                defaults.append("subtitle")
             ordered = [k for k in user if k in defaults]
             for k in defaults:
                 if k not in ordered:
                     ordered.append(k)
             return ordered
-        return super()._batch_pipeline_order()
+        defaults = list(super()._batch_pipeline_order())
+        if "subtitle" not in defaults:
+            defaults.append("subtitle")
+        return defaults
+
+    def _batch_step_enabled(self, key: str) -> bool:  # type: ignore[override]
+        if key == "subtitle":
+            return self._is_enabled("subtitle_enable")
+        return super()._batch_step_enabled(key)
+
+    @staticmethod
+    def _batch_step_label(key: str) -> str:  # type: ignore[override]
+        if key == "subtitle":
+            return "字幕识别/翻译/烧录"
+        return VideoBatchToolV21._batch_step_label(key)
+
+    def _run_batch_step(  # type: ignore[override]
+        self,
+        key: str,
+        current: str,
+        inp: str,
+        out: str,
+        temps: list[str],
+        idx: int,
+        total: int,
+    ) -> str:
+        if key != "subtitle":
+            return super()._run_batch_step(key, current, inp, out, temps, idx, total)
+
+        import shutil
+        from modules.output_naming import unique_path
+        from modules.subtitle_engine import SubtitleEngine
+
+        self._set_batch_step_status(idx, total, self._batch_step_label(key))
+
+        def _parse_ui_lang(ui: str) -> str | None:
+            ui = (ui or "").strip()
+            if not ui:
+                return None
+            if "auto" in ui or "自动" in ui:
+                return None
+            if "不翻译" in ui or "none" in ui:
+                return "none"
+            if "(" in ui and ")" in ui:
+                return ui[ui.find("(") + 1 : ui.rfind(")")].strip()
+            return ui
+
+        src_ui = getattr(self, "subtitle_src_lang", None).get() if getattr(self, "subtitle_src_lang", None) is not None else "自动检测(auto)"
+        tgt_ui = getattr(self, "subtitle_tgt_lang", None).get() if getattr(self, "subtitle_tgt_lang", None) is not None else "不翻译(none)"
+
+        src_code = _parse_ui_lang(src_ui)
+        tgt_code = _parse_ui_lang(tgt_ui)
+
+        source_lang_whisper = None if not src_code or src_code == "none" else src_code
+
+        target_google: str | None = None
+        if tgt_code and tgt_code != "none":
+            if tgt_code == "zh":
+                target_google = "zh-cn"
+            else:
+                target_google = tgt_code
+
+        model_size = (
+            getattr(self, "subtitle_model_size", None).get()
+            if getattr(self, "subtitle_model_size", None) is not None
+            else "small"
+        )
+        font_name = (
+            getattr(self, "subtitle_font_name", None).get()
+            if getattr(self, "subtitle_font_name", None) is not None
+            else "Arial Unicode MS"
+        )
+        burn_in = bool(
+            getattr(self, "subtitle_burn_in", None).get()
+            if getattr(self, "subtitle_burn_in", None) is not None
+            else True
+        )
+
+        tmp_srt = self.get_temp(out, "subtitle", ext="srt")
+        temps.append(tmp_srt)
+
+        out_srt_name = Path(out).with_suffix(".srt").name
+        out_srt_path = unique_path(os.path.dirname(out), out_srt_name)
+
+        tmp_video: str | None = None
+        if burn_in:
+            tmp_video = self.get_temp(out, "subtitle_burn", ext="mp4")
+            temps.append(tmp_video)
+
+        engine = SubtitleEngine(
+            ffmpeg_path=v20.FFMPEG_PATH,
+            whisper_model_size=model_size,
+            device="cpu",
+            compute_type="int8",
+            font_name=font_name,
+        )
+
+        engine.process_video_to_srt(
+            current,
+            tmp_srt,
+            source_lang=source_lang_whisper,
+            target_lang=target_google,
+        )
+
+        if burn_in and tmp_video:
+            engine.burn_subtitles(current, tmp_srt, tmp_video)
+
+        try:
+            if os.path.exists(out_srt_path):
+                os.remove(out_srt_path)
+        except Exception:
+            pass
+        shutil.move(tmp_srt, str(out_srt_path))
+
+        # burn_in=True 时返回中间视频给后续 safe_publish_media；否则保持 current 不变
+        return tmp_video if burn_in else current
 
     def _load_user_pipeline_order(self) -> None:
         try:
@@ -932,6 +1062,7 @@ class VideoBatchToolV24(_V23):
             "png_wm": "png_wm_enable",
             "ending": "ending_enable",
             "overlay": "overlay_enable",
+            "subtitle": "subtitle_enable",
         }
         attr = mapping.get(key)
         return getattr(self, attr, None) if attr else None
@@ -1509,6 +1640,96 @@ class VideoBatchToolV24(_V23):
         make_button(body, "切换到命名页", self.open_naming_tool, kind="info").pack(fill=X)
         make_button(body, "保存配置", self.save_config, kind="outline").pack(fill=X, pady=(6, 0))
 
+        # 生产队列（页面级 UX 骨架）
+        card, _hdr, body = self._module_card(mid, "生产队列", "🧾", "queue")
+        card.pack(fill=X, pady=(0, 12))
+        ttk.Label(
+            body,
+            text="把当前设置加入队列，按顺序批量处理（先做骨架与可运行单队列执行）。",
+            foreground=WB_MUTED,
+            wraplength=320,
+            font=("", 9),
+        ).pack(anchor="w", pady=(0, 8))
+
+        q_btns = ttk.Frame(body)
+        q_btns.pack(fill=X)
+        make_button(q_btns, "加当前批处理", self._queue_add_current_job, kind="outline", width=12).pack(
+            side=LEFT, padx=(0, 4),
+        )
+        make_button(q_btns, "加当前裂变", self._queue_add_current_fission_job, kind="outline", width=12).pack(
+            side=LEFT, padx=(4, 0),
+        )
+        make_button(q_btns, "开始队列", self._queue_start_jobs, kind="success", width=10).pack(
+            side=LEFT, padx=(8, 0),
+        )
+        make_button(q_btns, "清空", self._queue_clear_jobs, kind="danger", width=8).pack(
+            side=LEFT, padx=(8, 0),
+        )
+
+        retry_row = ttk.Frame(body)
+        retry_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(retry_row, text="失败重试(次):", foreground=WB_MUTED).pack(side=LEFT)
+        self._queue_retry_var = StringVar(value="1")
+        ttk.Combobox(
+            retry_row, textvariable=self._queue_retry_var, width=6, state="readonly",
+            values=["0", "1", "2", "3"],
+        ).pack(side=LEFT, padx=(6, 0))
+
+        self._queue_tree = ttk.Treeview(body, columns=("st", "inp", "out"), show="headings", height=4)
+        self._queue_tree.heading("st", text="状态")
+        self._queue_tree.heading("inp", text="输入")
+        self._queue_tree.heading("out", text="输出")
+        self._queue_tree.column("st", width=60, stretch=False, anchor="center")
+        self._queue_tree.column("inp", width=140, stretch=True, anchor="w")
+        self._queue_tree.column("out", width=140, stretch=True, anchor="w")
+        self._queue_tree.pack(fill=X, pady=(8, 0))
+
+        # Watch Folder：监视子文件夹，扫描一次可直接加入队列
+        watch_card, _wh, watch_body = self._module_card(mid, "监视文件夹", "👁️", "watch")
+        watch_card.pack(fill=X, pady=(0, 12))
+        ttk.Label(
+            watch_body,
+            text="把素材投放到监视目录的子文件夹中；点击「扫描并加入队列」会识别新子文件夹并加入队列。",
+            foreground=WB_MUTED,
+            wraplength=320,
+            font=("", 9),
+        ).pack(anchor="w", pady=(0, 6))
+
+        self._watch_in_var = StringVar(value="")
+        self._watch_out_var = StringVar(value="")
+        self._watch_interval_var = StringVar(value="30")  # 秒
+
+        w1 = ttk.Frame(watch_body)
+        w1.pack(fill=X)
+        ttk.Entry(w1, textvariable=self._watch_in_var).pack(side=LEFT, fill=X, expand=True)
+        make_button(
+            w1, "浏览", lambda: self._pick_dir(self._watch_in_var, "选择监视目录"),
+            kind="outline", width=6,
+        ).pack(side=LEFT, padx=(6, 0))
+
+        w2 = ttk.Frame(watch_body)
+        w2.pack(fill=X, pady=(6, 0))
+        ttk.Entry(w2, textvariable=self._watch_out_var).pack(side=LEFT, fill=X, expand=True)
+        make_button(
+            w2, "浏览", lambda: self._pick_dir(self._watch_out_var, "选择监视输出根"),
+            kind="outline", width=6,
+        ).pack(side=LEFT, padx=(6, 0))
+
+        w3 = ttk.Frame(watch_body)
+        w3.pack(fill=X, pady=(6, 0))
+        ttk.Label(w3, text="轮询(秒):").pack(side=LEFT)
+        ttk.Entry(w3, textvariable=self._watch_interval_var, width=6).pack(side=LEFT, padx=(6, 0))
+
+        wbtns = ttk.Frame(watch_body)
+        wbtns.pack(fill=X, pady=(8, 0))
+        make_button(wbtns, "扫描并加入队列", self._watch_scan_once_and_add, kind="outline", width=16).pack(
+            side=LEFT, padx=(0, 6),
+        )
+        make_button(wbtns, "开始监视", self._watch_start_monitor, kind="info", width=10).pack(
+            side=LEFT, padx=(0, 6),
+        )
+        make_button(wbtns, "停止", self._watch_stop_monitor, kind="danger", width=8).pack(side=LEFT)
+
         card, _hdr, body = self._module_card(mid, "处理进度", "📊", "progress")
         card.pack(fill=X, pady=(0, 12))
         ttk.Label(body, textvariable=self.status_var, wraplength=300).pack(anchor="w", pady=(0, 6))
@@ -1528,6 +1749,368 @@ class VideoBatchToolV24(_V23):
         actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         make_button(actions, "开始批处理（当前方案）", self.start_batch, kind="success").pack(fill=X, pady=(0, 6))
         make_button(actions, "打开批量裂变页", self.open_fission_tab, kind="info").pack(fill=X)
+
+    # ----- 生产队列 / Watch Folder（V24 页面级 UX） -----
+
+    def _pick_dir(self, var: StringVar, title: str) -> None:
+        p = filedialog.askdirectory(parent=self.root, title=title)
+        if p:
+            var.set(p)
+
+    def _queue_render(self) -> None:
+        tree = getattr(self, "_queue_tree", None)
+        if tree is None:
+            return
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for job in self._job_queue:
+            kind = str(job.get("kind") or "batch")
+            label = "裂变" if kind == "fission" else "批处理"
+            tree.insert(
+                "",
+                END,
+                iid=str(job["id"]),
+                values=(
+                    f"{label}/{job.get('status', '—')}",
+                    (job.get("input") or "")[:34],
+                    (job.get("output") or "")[:34],
+                ),
+            )
+
+    def _queue_add_current_job(self) -> None:
+        if getattr(self, "_job_queue_running", False):
+            messagebox.showwarning("提示", "队列正在运行中，请稍后")
+            return
+        try:
+            cfg = dict(self._current_config_dict())
+        except Exception as exc:
+            messagebox.showerror("错误", f"无法读取当前配置：{exc}")
+            return
+        inp = str(cfg.get("global_input") or "").strip()
+        out = str(cfg.get("global_output") or "").strip()
+        if not inp or not os.path.isdir(inp):
+            messagebox.showwarning("提示", "请先设置有效的全局输入文件夹（或在监视目录中扫描）")
+            return
+        if not out:
+            messagebox.showwarning("提示", "请先设置全局输出根路径")
+            return
+
+        job = {
+            "id": self._job_queue_next_id,
+            "status": "已加入",
+            "kind": "batch",
+            "cfg": cfg,
+            "input": inp,
+            "output": out,
+        }
+        self._job_queue_next_id += 1
+        self._job_queue.append(job)
+        self._queue_render()
+
+    def _queue_add_current_fission_job(self) -> None:
+        if getattr(self, "_job_queue_running", False):
+            messagebox.showwarning("提示", "队列正在运行中，请稍后")
+            return
+        try:
+            panel = getattr(self, "_fission_panel", None)
+            if panel is not None and hasattr(panel, "sync_groups_to_plan"):
+                panel.sync_groups_to_plan()
+        except Exception:
+            pass
+
+        plan = getattr(self, "_fission_plan", None)
+        if plan is None:
+            messagebox.showwarning("提示", "当前没有裂变计划")
+            return
+        groups = list(plan.enabled_groups())
+        branches = list(plan.enabled_branches())
+        if not groups:
+            messagebox.showwarning("提示", "请先配置至少一个启用的源素材组")
+            return
+        if not branches:
+            messagebox.showwarning("提示", "请先配置至少一个启用的裂变方案")
+            return
+
+        from modules.fission_engine import branch_to_dict, source_group_to_dict
+
+        payload = []
+        for g in groups:
+            selected = set(g.selected_branch_names or [])
+            picked = [b for b in branches if not selected or b.branch_name in selected]
+            if not picked:
+                continue
+            payload.append((source_group_to_dict(g), [branch_to_dict(b) for b in picked]))
+        if not payload:
+            messagebox.showwarning("提示", "当前源组没有匹配到可运行的裂变方案")
+            return
+
+        # snapshot 让裂变结束后能还原当前工作台状态
+        try:
+            snapshot = dict(self._current_config_dict())
+        except Exception:
+            snapshot = {}
+
+        first_in = str(groups[0].input_folder or "").strip()
+        out_root = str((groups[0].output_folder or "") or (self.global_output_folder.get() or "")).strip()
+        job = {
+            "id": self._job_queue_next_id,
+            "status": "已加入",
+            "kind": "fission",
+            "payload": payload,
+            "snapshot": snapshot,
+            "input": first_in,
+            "output": out_root,
+        }
+        self._job_queue_next_id += 1
+        self._job_queue.append(job)
+        self._queue_render()
+
+    def _queue_clear_jobs(self) -> None:
+        if getattr(self, "_job_queue_running", False):
+            messagebox.showwarning("提示", "队列正在运行中，请稍后")
+            return
+        self._job_queue = []
+        self._queue_render()
+
+    def _queue_start_jobs(self) -> None:
+        if getattr(self, "_job_queue_running", False) or getattr(self, "_processing", False):
+            messagebox.showwarning("提示", "正在处理中或队列已运行中")
+            return
+        if not self._job_queue:
+            messagebox.showwarning("提示", "队列为空：请先点击「加入队列」")
+            return
+
+        self._job_queue_running = True
+        jobs = list(self._job_queue)
+
+        def _set_job_status(job_id: int, status: str) -> None:
+            def _apply() -> None:
+                for j in self._job_queue:
+                    if int(j.get("id")) == int(job_id):
+                        j["status"] = status
+                        break
+                self._queue_render()
+
+            self.root.after(0, _apply)
+
+        def _worker() -> None:
+            import threading
+            import time
+
+            try:
+                max_retries = int(float(self._queue_retry_var.get() or "1"))
+            except Exception:
+                max_retries = 1
+            max_retries = max(0, min(3, max_retries))
+            attempts = max_retries + 1
+            import shutil
+
+            for job in jobs:
+                job_id = int(job.get("id"))
+                kind = str(job.get("kind") or "batch")
+
+                watch_src = str(job.get("watch_source_dir") or "").strip()
+                watch_done_dir = str(job.get("watch_done_dir") or "").strip()
+                watch_failed_dir = str(job.get("watch_failed_dir") or "").strip()
+
+                success = False
+                last_err = ""
+
+                for attempt in range(1, attempts + 1):
+                    if attempts > 1:
+                        _set_job_status(job_id, f"处理中(第{attempt}/{attempts}次)")
+                    else:
+                        _set_job_status(job_id, "处理中")
+
+                    err_box: dict[str, str] = {}
+
+                    if kind == "fission":
+                        payload = list(job.get("payload") or [])
+                        snapshot = dict(job.get("snapshot") or {})
+                        if not payload:
+                            _set_job_status(job_id, "跳过(裂变为空)")
+                            break
+
+                        def _run_fission():
+                            try:
+                                self._fission_worker_groups(payload, snapshot)
+                            except Exception as e:
+                                err_box["err"] = str(e)
+
+                        t = threading.Thread(target=_run_fission, daemon=True)
+                        t.start()
+                        while t.is_alive() or getattr(self, "_fission_running", False) or getattr(self, "_processing", False):
+                            time.sleep(0.2)
+                    else:
+                        cfg = job.get("cfg") or {}
+                        inp = str(cfg.get("global_input") or "").strip()
+                        out = str(cfg.get("global_output") or "").strip()
+                        if not inp or not os.path.isdir(inp) or not out:
+                            _set_job_status(job_id, "跳过(输入/输出无效)")
+                            break
+
+                        ev = threading.Event()
+
+                        def _apply_cfg():
+                            try:
+                                self._apply_config_dict(cfg, io_mode="template")
+                            except Exception:
+                                pass
+                            finally:
+                                ev.set()
+
+                        self.root.after(0, _apply_cfg)
+                        ev.wait()
+
+                        try:
+                            # process_batch 内部会在 _processing True/False 之间更新 UI
+                            self.process_batch(silent=True)  # type: ignore[arg-type]
+                        except Exception as e:
+                            err_box["err"] = str(e)
+
+                        while getattr(self, "_processing", False):
+                            time.sleep(0.2)
+
+                    success = not err_box
+                    if success:
+                        break
+                    last_err = str(err_box.get("err") or "")
+                    if attempt < attempts:
+                        _set_job_status(job_id, f"失败，重试中({attempt}/{attempts})")
+
+                final_status = "完成" if success else "失败"
+                _set_job_status(job_id, final_status)
+
+                # Watch Folder 自动归档：成功->done；失败->failed
+                if watch_src and os.path.isdir(watch_src):
+                    dst_root = watch_done_dir if success else watch_failed_dir
+                    if dst_root:
+                        try:
+                            os.makedirs(dst_root, exist_ok=True)
+                            base = os.path.basename(watch_src.rstrip("\\/"))
+                            dst = os.path.join(dst_root, base)
+                            if os.path.exists(dst):
+                                dst = os.path.join(dst_root, f"{base}_{int(time.time())}")
+                            shutil.move(watch_src, dst)
+                        except Exception:
+                            # 归档失败不打断主流程
+                            pass
+
+            def _done():
+                self._job_queue_running = False
+                self._queue_render()
+
+            self.root.after(0, _done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ---- Watch Folder ----
+
+    def _watch_scan_once_and_add(self) -> None:
+        self._watch_scan_impl(notify=True)
+
+    def _watch_scan_impl(self, *, notify: bool) -> int:
+        root_in = (getattr(self, "_watch_in_var", None).get() if hasattr(self, "_watch_in_var") else "").strip()
+        out_root = (getattr(self, "_watch_out_var", None).get() if hasattr(self, "_watch_out_var") else "").strip()
+        if not root_in or not os.path.isdir(root_in):
+            if notify:
+                messagebox.showwarning("提示", "请先选择有效的监视目录")
+            return 0
+        if not out_root:
+            out_root = (self.global_output_folder.get() or "").strip()
+        if not out_root:
+            if notify:
+                messagebox.showwarning("提示", "请先设置监视输出根（或先设置全局输出根）")
+            return 0
+
+        try:
+            from core.overlay_engine import list_videos_in_folder
+        except Exception:
+            list_videos_in_folder = None  # type: ignore
+
+        try:
+            children = [os.path.join(root_in, name) for name in os.listdir(root_in)]
+        except OSError:
+            if notify:
+                messagebox.showwarning("提示", "无法读取监视目录")
+            return 0
+        children = [p for p in children if os.path.isdir(p)]
+
+        added = 0
+        done_root = os.path.join(root_in, "done")
+        failed_root = os.path.join(root_in, "failed")
+        try:
+            os.makedirs(done_root, exist_ok=True)
+            os.makedirs(failed_root, exist_ok=True)
+        except Exception:
+            pass
+        for p in sorted(children):
+            if p in self._watch_seen_dirs:
+                continue
+            if list_videos_in_folder is not None:
+                try:
+                    video_ok = bool(list_videos_in_folder(p))
+                except Exception:
+                    video_ok = False
+                if not video_ok:
+                    continue
+
+            self._watch_seen_dirs.add(p)
+            try:
+                cfg = dict(self._current_config_dict())
+            except Exception:
+                continue
+            cfg["global_input"] = p
+            cfg["global_output"] = os.path.join(out_root, os.path.basename(p))
+            self._job_queue.append(
+                {
+                    "id": self._job_queue_next_id,
+                    "status": "已加入",
+                    "kind": "batch",
+                    "cfg": cfg,
+                    "input": cfg["global_input"],
+                    "output": cfg["global_output"],
+                    "watch_source_dir": p,
+                    "watch_done_dir": done_root,
+                    "watch_failed_dir": failed_root,
+                }
+            )
+            self._job_queue_next_id += 1
+            added += 1
+
+        self._queue_render()
+        if notify:
+            messagebox.showinfo("完成", f"扫描完成：新增 {added} 个子文件夹到队列")
+        return added
+
+    def _watch_start_monitor(self) -> None:
+        if getattr(self, "_watch_monitor_running", False):
+            return
+        root_in = (getattr(self, "_watch_in_var", None).get() if hasattr(self, "_watch_in_var") else "").strip()
+        if not root_in or not os.path.isdir(root_in):
+            messagebox.showwarning("提示", "请先选择有效的监视目录")
+            return
+        self._watch_monitor_running = True
+
+        import threading
+        import time
+
+        def _poll():
+            while self._watch_monitor_running:
+                try:
+                    self.root.after(0, lambda: self._watch_scan_impl(notify=False))
+                except Exception:
+                    pass
+                try:
+                    interval = int(float(self._watch_interval_var.get() or "30"))
+                except Exception:
+                    interval = 30
+                time.sleep(max(5, interval))
+
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _watch_stop_monitor(self) -> None:
+        self._watch_monitor_running = False
 
 
     def _apply_global_memory(self, *, force_autoload: bool = False) -> None:
@@ -1854,6 +2437,73 @@ class VideoBatchToolV24(_V23):
         make_button(bf, "清空记忆空间", wipe_memory_factory, kind="danger").pack(side=LEFT, padx=6)
         make_button(bf, "取消", win.destroy, kind="outline").pack(side=RIGHT, padx=4)
         make_button(bf, "保存并应用", save_and_apply, kind="success").pack(side=RIGHT)
+
+    def build_subtitle_section(self, row, col):
+        # 该功能是否执行由左侧「功能勾选」控制；这里只负责创建参数变量
+        self.subtitle_enable = BooleanVar(value=False)
+        card, _hdr, frame = self._module_card(
+            self.main_frame,
+            "字幕识别/翻译/烧录",
+            "💬",
+            "subtitle",
+            enable_var=self.subtitle_enable,
+        )
+        self._grid_card(card, row, col)
+        self._configure_form_grid(frame)
+
+        self.subtitle_src_lang = StringVar(value="自动检测(auto)")
+        self.subtitle_tgt_lang = StringVar(value="中文(zh)")
+        self.subtitle_model_size = StringVar(value="small")
+        self.subtitle_burn_in = BooleanVar(value=True)
+        self.subtitle_font_name = StringVar(value="Microsoft YaHei")
+
+        self._lab(frame, "源语言(Whisper):", row=1)
+        ttk.Combobox(
+            frame,
+            textvariable=self.subtitle_src_lang,
+            values=["自动检测(auto)", "阿拉伯语(ar)", "土耳其语(tr)", "中文(zh)"],
+            width=18,
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=4, pady=5)
+
+        self._lab(frame, "目标语言(翻译):", row=2)
+        ttk.Combobox(
+            frame,
+            textvariable=self.subtitle_tgt_lang,
+            values=["不翻译(none)", "中文(zh)", "阿拉伯语(ar)", "土耳其语(tr)"],
+            width=18,
+            state="readonly",
+        ).grid(row=2, column=1, sticky="ew", padx=4, pady=5)
+
+        self._lab(frame, "Whisper模型:", row=3)
+        ttk.Combobox(
+            frame,
+            textvariable=self.subtitle_model_size,
+            values=["tiny", "base", "small", "turbo", "medium", "large-v3"],
+            width=18,
+            state="readonly",
+        ).grid(row=3, column=1, sticky="ew", padx=4, pady=5)
+
+        # 烧录开关
+        ttk.Label(frame, text=" ").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=5)
+        ttk.Checkbutton(
+            frame,
+            text="烧录字幕到视频",
+            variable=self.subtitle_burn_in,
+        ).grid(row=4, column=1, sticky="w", padx=4, pady=5)
+
+        self._lab(frame, "字体(阿语必选):", row=5)
+        ttk.Entry(frame, textvariable=self.subtitle_font_name, width=24).grid(
+            row=5, column=1, sticky="ew", padx=4, pady=5,
+        )
+
+        ttk.Label(
+            frame,
+            text="提示：需安装 faster-whisper；翻译需 googletrans。烧录阿语建议用 Arial Unicode MS 等支持阿语字体。",
+            foreground=WB_MUTED,
+            wraplength=420,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
 
     def build_ui(self):
         paned = ttk.Panedwindow(self.main_frame, orient=tk.HORIZONTAL)

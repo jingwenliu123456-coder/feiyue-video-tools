@@ -1881,6 +1881,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                 self._is_enabled("ending_enable"), self._is_enabled("logo_enable"),
                 self._is_enabled("enable_mov_watermark"), self._is_enabled("png_wm_enable"),
                 self._is_enabled("overlay_enable"),
+                self._is_enabled("subtitle_enable"),
             ])
             if not enabled:
                 if not silent:
