@@ -18,6 +18,15 @@ FONTS = {
 PAD = {"xs": 4, "sm": 8, "md": 16, "lg": 24, "xl": 32}
 
 THEME_NAMES = ("darkly", "flatly", "superhero", "cyborg", "minty", "litera", "sandstone")
+THEME_LABELS_ZH: dict[str, str] = {
+    "darkly": "深色简约",
+    "flatly": "浅色清爽",
+    "superhero": "深蓝护眼",
+    "cyborg": "暗黑科技",
+    "minty": "薄荷绿",
+    "litera": "纸质阅读",
+    "sandstone": "沙岩暖色",
+}
 UI_THEME_NONE = "none"
 UI_THEME_NONE_LABEL = "无主题（经典皮肤）"
 
@@ -521,8 +530,9 @@ def add_theme_menu(
         )
         theme_menu.add_separator()
         for name in THEME_NAMES:
+            zh = THEME_LABELS_ZH.get(name, name)
             theme_menu.add_radiobutton(
-                label=name,
+                label=zh,
                 variable=var,
                 value=name,
                 command=lambda n=name: _apply_bootstrap(n),

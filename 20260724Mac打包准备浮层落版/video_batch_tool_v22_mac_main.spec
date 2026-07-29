@@ -104,6 +104,8 @@ hiddenimports = (
         "modules.output_naming",
         "modules.image_composite",
         "modules.platform_utils",
+        "modules.folder_drop",
+        "modules.asset_library",
         "modules.ui_skin",
         "modules.theme_utils",
         "modules.tool_stats",
@@ -122,6 +124,7 @@ hiddenimports = (
         "ui.timeline_canvas",
         "ui.annual_report_ui",
         "ui.annual_report_html",
+        "tkinterdnd2",
     ]
 )
 

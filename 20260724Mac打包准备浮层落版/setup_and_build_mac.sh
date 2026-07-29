@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 PROJECT_DIR="$(pwd)"
 
 echo "============================================"
-echo "  HabiVideoTool - macOS 全自动打包"
+echo "  飞跃视频工具 V22 - macOS 全自动打包"
 echo "============================================"
 echo ""
 
@@ -93,10 +93,10 @@ fi
 
 if ! python3 -m pip show pyinstaller &>/dev/null 2>&1; then
     echo "  PyInstaller 未安装，正在安装..."
-    python3 -m pip install pyinstaller pillow ttkbootstrap
+    python3 -m pip install pyinstaller pillow ttkbootstrap tkinterdnd2
 else
     echo "  PyInstaller 已安装 ✓"
-    python3 -m pip install -q pillow ttkbootstrap 2>/dev/null || true
+    python3 -m pip install -q pillow ttkbootstrap tkinterdnd2 2>/dev/null || true
 fi
 
 if ! python3 -c "import ttkbootstrap" &>/dev/null; then
@@ -105,6 +105,11 @@ if ! python3 -c "import ttkbootstrap" &>/dev/null; then
     exit 1
 fi
 echo "  ttkbootstrap 已安装 ✓"
+if python3 -c "import tkinterdnd2" &>/dev/null; then
+    echo "  tkinterdnd2 已安装 ✓（支持拖入文件夹）"
+else
+    echo "  [提示] tkinterdnd2 未装上：打包后仍可用「选择文件夹」，拖入可能不可用"
+fi
 
 # ========== 5. 执行打包 ==========
 echo ""

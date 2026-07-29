@@ -1,0 +1,7 @@
+Synced from Windows workspace for V22 macOS packaging.
+Time: 2026-07-24T17:28:47
+Product: 飞跃视频工具 V22（纯批处理，不含 V23/V24 裂变）
+Includes: v20/v21/v22 + core/modules/ui + naming_tool + folder_drop
+Layer/endcard: video_batch_tool_v21.apply_overlay_endcard
+On Mac: chmod +x setup_and_build_mac.sh && ./setup_and_build_mac.sh
+Output: dist/HabiVideoTool_macOS/ (HabiVideoTool.app + HabiNamingTool.app)

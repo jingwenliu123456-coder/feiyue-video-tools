@@ -981,11 +981,11 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     @staticmethod
     def _batch_step_label(key: str) -> str:
         return {
-            "cut": "裁切",
+            "cut": "视频裁切",
             "enhance": "画质增强",
             "ratio": "比例适配",
-            "mov_wm": "MOV水印",
-            "png_wm": "PNG水印",
+            "mov_wm": "动态水印",
+            "png_wm": "静态水印",
             "layer": "浮层落版",
             "ending": "拼接落版",
             "overlay": "画布叠加",
@@ -1039,13 +1039,13 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         if key == "mov_wm":
             wp = self.mov_watermark_path.get()
             if not wp or not os.path.exists(wp):
-                raise RuntimeError("水印MOV不存在")
+                raise RuntimeError("动态水印文件未设置或不存在，请先选好文件再处理")
             mode = self.mov_watermark_mode.get() or "fullscreen"
             duration_sec = int(self.mov_watermark_duration.get() or "0")
             tmp = self.get_temp(out, "movwm")
             if mode == "fullscreen":
                 self._add_mov_wm(current, wp, tmp, mode="fullscreen", duration_sec=duration_sec)
-                pos_msg = "全屏贴合 scale2ref"
+                pos_msg = "全屏贴合"
             else:
                 x = int(self.mov_watermark_x.get() or 0)
                 y = int(self.mov_watermark_y.get() or 0)
@@ -1057,26 +1057,26 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             if current != inp:
                 temps.append(current)
             dur_msg = f"显示{duration_sec}秒" if duration_sec > 0 else "全程显示"
-            self.log(f"  MOV水印叠加完成 ({pos_msg}) {dur_msg}")
+            self.log(f"  动态水印叠加完成 ({pos_msg}) {dur_msg}")
             return tmp
 
         if key == "png_wm":
             wp = self.png_wm_path.get()
             if not wp or not os.path.exists(wp):
-                raise RuntimeError("PNG水印文件不存在")
+                raise RuntimeError("静态水印文件未设置或不存在，请先选好文件再处理")
             tmp = self.get_temp(out, "pngwm")
             sp = self._png_overlay_scale_percent()
             pos = self.png_wm_position.get() or "居中"
             self.apply_overlay_sticker(current, wp, tmp)
             if current != inp:
                 temps.append(current)
-            self.log(f"  PNG水印完成 ({pos}, 宽{sp:.0f}%)")
+            self.log(f"  静态水印完成 ({pos}, 宽{sp:.0f}%)")
             return tmp
 
         if key == "layer":
             lp = self.logo_path_var.get()
             if not lp or not os.path.exists(lp):
-                raise RuntimeError("叠加落版文件不存在")
+                raise RuntimeError("浮层落版文件未设置或不存在，请先选好文件再处理")
             tmp = self.get_temp(out, "endcard")
             self.apply_overlay_endcard(current, lp, tmp)
             if current != inp:
@@ -1088,7 +1088,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             self.log("  正在拼接落版…")
             ep = self.ending_file_var.get()
             if not ep or not os.path.exists(ep):
-                raise RuntimeError("落版视频不存在")
+                raise RuntimeError("拼接落版视频未设置或不存在，请先选好文件再处理")
             try:
                 trim_sec = int(float(self.ending_concat_trim.get() or "0"))
             except ValueError:
@@ -1529,6 +1529,9 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         return None
 
     def _refresh_endcard_timeline(self):
+        # 裂变切方案时会频繁改路径；此时跳过 ffprobe，避免主线程卡住近分钟
+        if getattr(self, "_ui_batch_quiet", False):
+            return
         tl = getattr(self, "_endcard_timeline", None)
         if not tl or (self.logo_mode.get() or "") != "结尾覆盖落版":
             return
@@ -1827,17 +1830,27 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     def _set_batch_step_status(self, idx: int, total: int, step: str = "") -> None:
         """idx = 当前正在处理的序号（1-based）；进度条仍表示已完成数 = idx-1。"""
         done = max(0, idx - 1)
+        phase = str(getattr(self, "_fission_phase_label", "") or "").strip()
 
-        def _apply(d=done, t=total, i=idx, s=step):
+        def _apply(d=done, t=total, i=idx, s=step, p=phase):
             if hasattr(self, "progress"):
                 self.progress["maximum"] = t
                 self.progress["value"] = d
-            msg = f"正在处理第 {i}/{t} 条（已完成 {d}）"
+            head = f"[{p}] " if p else ""
+            msg = f"{head}正在处理第 {i}/{t} 条（已完成 {d}）"
             if s:
                 msg += f" · {s}"
             self.status_var.set(msg)
 
         self.root.after(0, _apply)
+
+    def _batch_backup_enabled(self) -> bool:
+        """设置里「备份模式」；默认关。"""
+        try:
+            from modules import habi_memory
+            return bool(habi_memory.prefs().get("batch_backup_enable"))
+        except Exception:
+            return False
 
     def process_batch(self, *, silent: bool = False):
         """silent=True 时不弹「完成」框（裂变多分支时用）。"""
@@ -1876,7 +1889,11 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                     self.log("警告: 本分支未启用任何批处理功能，已跳过")
                 return
 
-            self.create_backup(out_dir)
+            # 备份模式默认关；裂变 silent 也始终不备份（多方案会极慢）
+            if (not silent) and self._batch_backup_enabled():
+                self.create_backup(out_dir)
+            elif not silent:
+                self._last_backup_dir = None
             files = self._list_videos(in_dir)
             if not files:
                 self.log("全局输入文件夹中没有视频")

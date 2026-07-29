@@ -198,11 +198,9 @@ class FissionMindmapPanel:
         self._pp_host.pack(fill=X, padx=8, pady=(4, 0))
         self._build_single_preprocess_strip(self._pp_host)
 
-        # 多源：源素材组列表（与单源分开，默认隐藏）
-        self._sg_host = ttk.Frame(self.frame)
+        # 多源组列表改挂在左栏（可全高滚动），不再占顶栏
         self._sg_cards: list[dict] = []
         self._sg_expanded: dict[str, bool] = {}
-        self._build_source_groups_panel(self._sg_host)
 
         self._body = ttk.Frame(self.frame)
         self._body.pack(fill=BOTH, expand=True, padx=8, pady=8)
@@ -347,31 +345,58 @@ class FissionMindmapPanel:
         paned = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
         paned.grid(row=0, column=0, sticky="nsew")
 
-        left = ttk.Frame(paned, width=220)
+        left = ttk.Frame(paned, width=260)
         self._left_pane = left
         self._map_paned = paned
         mid = ttk.Frame(paned)
-        self._right_outer = tk.Frame(paned, width=220, bg=self.th["bg"])
+        self._right_outer = tk.Frame(paned, width=240, bg=self.th["bg"])
         paned.add(left, weight=1)
-        paned.add(mid, weight=4)
+        paned.add(mid, weight=5)
         paned.add(self._right_outer, weight=1)
         try:
-            # 防止中间区（尤其地铁双栏）把右栏挤没
-            self.root.after(120, lambda: paned.sashpos(1, max(paned.winfo_width() - 230, 400)))
+            paned.pane(left, weight=1)
+            paned.pane(mid, weight=5)
+            paned.pane(self._right_outer, weight=1)
+        except Exception:
+            pass
+        self._map_sash_ready = False
+        try:
+            self.root.after(80, self._apply_map_default_sashes)
+            self.root.after(280, self._apply_map_default_sashes)
         except Exception:
             pass
 
-        ttk.Label(left, text="输入文件夹", font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", padx=8, pady=(8, 4))
-        ttk.Label(left, text="主文件夹排最上 · ▲▼ 排序", foreground="gray", font=("", 8)).pack(anchor="w", padx=8)
-        self._folder_host = ttk.Frame(left)
+        # 左栏：单源=输入夹；多源=源组列表（同一列，全高可滚）
+        left.rowconfigure(0, weight=1)
+        left.columnconfigure(0, weight=1)
+        self._left_single_host = ttk.Frame(left)
+        self._left_multi_host = ttk.Frame(left)
+        self._left_single_host.grid(row=0, column=0, sticky="nsew")
+        self._left_multi_host.grid(row=0, column=0, sticky="nsew")
+        self._left_multi_host.grid_remove()
+
+        single = self._left_single_host
+        ttk.Label(single, text="① 输入文件夹", font=("Microsoft YaHei", 10, "bold")).pack(
+            anchor="w", padx=8, pady=(8, 2),
+        )
+        ttk.Label(single, text="主文件夹排最上 · 可拖入", foreground="gray", font=("", 8)).pack(
+            anchor="w", padx=8,
+        )
+        self._folder_host = ttk.Frame(single)
         self._folder_host.pack(fill=BOTH, expand=True, padx=6, pady=6)
-        make_button(left, "＋ 添加文件夹", self._add_folder, kind="outline").pack(fill=X, padx=8, pady=(0, 4))
-        drop = tk.Label(left, text="或拖入文件夹 / 点击添加", bg=self.th["card"], fg=self.th["muted"], relief="groove", bd=1, pady=10)
+        make_button(single, "＋ 添加文件夹", self._add_folder, kind="outline").pack(fill=X, padx=8, pady=(0, 4))
+        drop = tk.Label(
+            single, text="拖入文件夹到这里\n或点击添加", bg=self.th["card"], fg=self.th["muted"],
+            relief="groove", bd=1, pady=12, justify=tk.CENTER,
+        )
         drop.pack(fill=X, padx=8, pady=(0, 8))
         drop.bind("<Button-1>", lambda _e: self._add_folder())
         self._drop_lbl = drop
         self._hook_folder_drop(drop)
         self._hook_folder_drop(self._folder_host)
+        self._hook_folder_drop(single)
+
+        self._build_source_groups_panel(self._left_multi_host)
 
         # 中间：地铁模式时 = 功能库 | 线路画布
         mid.columnconfigure(0, weight=1)
@@ -406,7 +431,8 @@ class FissionMindmapPanel:
         xsb.grid(row=1, column=0, sticky="ew")
         canvas_wrap.rowconfigure(0, weight=1)
         canvas_wrap.columnconfigure(0, weight=1)
-        self.canvas.bind("<Configure>", lambda _e: self.redraw())
+        self._canvas_cfg_job = None
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
         self.canvas.bind("<Button-1>", self._on_canvas_press)
         self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
@@ -425,13 +451,13 @@ class FissionMindmapPanel:
         right = self._right_outer
         # 右栏用 tk 控件，深色皮肤时不割裂
         self._right_title = tk.Label(
-            right, text="输出（全局根）", bg=self.th["bg"], fg=self.th["text"],
+            right, text="③ 输出（全局根）", bg=self.th["bg"], fg=self.th["text"],
             font=("Microsoft YaHei", 10, "bold"),
         )
         self._right_title.pack(anchor="w", padx=8, pady=(8, 2))
         self._right_sub = tk.Label(
-            right, text="选一个总文件夹；每个方案自动建子目录",
-            bg=self.th["bg"], fg=self.th["muted"], font=("", 8), wraplength=180, justify="left",
+            right, text="选总文件夹；每个方案自动建子目录",
+            bg=self.th["bg"], fg=self.th["muted"], font=("", 8), wraplength=210, justify="left",
         )
         self._right_sub.pack(anchor="w", padx=8)
 
@@ -448,7 +474,7 @@ class FissionMindmapPanel:
         row.pack(fill=X)
         make_button(row, "选择…", self._pick_output_root, kind="outline", width=7).pack(side=LEFT)
         make_button(row, "打开", self.app.open_global_output, kind="outline", width=5).pack(side=LEFT, padx=4)
-        self._out_hint = tk.Label(out_box, text="", bg=self.th["bg"], fg=self.th["muted"], font=("", 8), wraplength=180, justify="left")
+        self._out_hint = tk.Label(out_box, text="", bg=self.th["bg"], fg=self.th["muted"], font=("", 8), wraplength=210, justify="left")
         self._out_hint.pack(anchor="w", pady=(4, 0))
         self._refresh_out_root_hint()
 
@@ -457,8 +483,29 @@ class FissionMindmapPanel:
             font=("Microsoft YaHei", 9, "bold"),
         )
         self._out_sec_title.pack(anchor="w", padx=8, pady=(10, 2))
-        self._out_host = tk.Frame(right, bg=self.th["bg"])
-        self._out_host.pack(fill=BOTH, expand=True, padx=6)
+        # 右栏列表可滚动，避免卡片反复重建时整栏跳动感
+        out_shell = tk.Frame(right, bg=self.th["bg"])
+        out_shell.pack(fill=BOTH, expand=True, padx=4, pady=(0, 4))
+        self._out_canvas = tk.Canvas(out_shell, bg=self.th["bg"], highlightthickness=0)
+        out_vsb = ttk.Scrollbar(out_shell, orient="vertical", command=self._out_canvas.yview)
+        self._out_host = tk.Frame(self._out_canvas, bg=self.th["bg"])
+        self._out_canvas_win = self._out_canvas.create_window((0, 0), window=self._out_host, anchor="nw")
+        self._out_canvas.configure(yscrollcommand=out_vsb.set)
+        self._out_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        out_vsb.pack(side=RIGHT, fill=Y)
+
+        def _sync_out_scroll(_e=None):
+            try:
+                self._out_canvas.configure(scrollregion=self._out_canvas.bbox("all"))
+                self._out_canvas.itemconfig(self._out_canvas_win, width=max(self._out_canvas.winfo_width(), 1))
+            except Exception:
+                pass
+
+        self._out_host.bind("<Configure>", _sync_out_scroll)
+        self._out_canvas.bind("<Configure>", _sync_out_scroll)
+        self._out_widgets: dict[str, dict[str, Any]] = {}
+        self._out_panel_fp: Any = None
+        self._sync_out_scroll = _sync_out_scroll
 
         # 右栏就绪后再切布局 / 首次绘制
         self._on_layout_change()
@@ -491,54 +538,82 @@ class FissionMindmapPanel:
         if hasattr(self, "_tip"):
             self._tip.config(
                 text=(
-                    "多源：上方每组各自选输入/预处理/方案；中间画布只当方案库"
+                    "多源：左栏每组选输入 → 中间画布加方案 → 右栏输出根 → 开始"
                     if multi else
-                    "单源：左文件夹 →（可选预处理成品）→ 画布多方案 → 右输出根"
+                    "单源：左栏输入 →（可选预处理）→ 中间画布多方案 → 右栏输出根 → 开始"
                 ),
             )
-        # 单源预处理条 / 多源组列表互斥显示
+        # 单源预处理条；多源组列表在左栏
         try:
             self._pp_host.pack_forget()
         except Exception:
             pass
-        try:
-            self._sg_host.pack_forget()
-        except Exception:
-            pass
-        if multi:
-            self._sg_host.pack(fill=X, padx=8, pady=(4, 0), before=self._body)
-            try:
-                self._rebuild_source_group_cards()
-            except Exception:
-                pass
-        else:
+        if not multi:
             self._pp_host.pack(fill=X, padx=8, pady=(4, 0), before=self._body)
 
-        # 多源时隐藏左侧「输入文件夹」（避免和源组重复）
+        # 左栏切换：单源文件夹 / 多源组列表
+        try:
+            if multi:
+                self._left_single_host.grid_remove()
+                self._left_multi_host.grid()
+                self._rebuild_source_group_cards()
+            else:
+                self._left_multi_host.grid_remove()
+                self._left_single_host.grid()
+        except Exception:
+            pass
+
+        # 确保左栏始终在三栏里（不再 remove）
         paned = getattr(self, "_map_paned", None)
         left = getattr(self, "_left_pane", None)
         if paned is not None and left is not None:
             try:
-                panes = list(paned.panes())
+                panes = [str(p) for p in paned.panes()]
             except Exception:
                 panes = []
-            if multi:
-                if str(left) in [str(p) for p in panes]:
+            if str(left) not in panes:
+                try:
+                    paned.insert(0, left, weight=1)
+                except Exception:
                     try:
-                        paned.forget(left)
+                        paned.add(left, weight=1)
                     except Exception:
                         pass
-            else:
-                if str(left) not in [str(p) for p in panes]:
-                    try:
-                        # 插回最左侧
-                        paned.insert(0, left, weight=1)
-                    except Exception:
-                        try:
-                            paned.add(left, weight=1)
-                        except Exception:
-                            pass
+            try:
+                self.root.after(60, self._apply_map_default_sashes)
+            except Exception:
+                pass
 
+    def _apply_map_default_sashes(self) -> None:
+        """默认：中间最大，左右约 22%/24%，像常见三栏工作台。"""
+        paned = getattr(self, "_map_paned", None)
+        if paned is None:
+            return
+        try:
+            paned.update_idletasks()
+            w = int(paned.winfo_width() or 0)
+        except Exception:
+            return
+        if w < 500:
+            return
+        left_w = max(240, min(320, int(w * 0.22)))
+        right_w = max(230, min(300, int(w * 0.24)))
+        try:
+            paned.sashpos(0, left_w)
+            paned.sashpos(1, max(left_w + 360, w - right_w))
+            self._map_sash_ready = True
+        except Exception:
+            pass
+
+    def _on_canvas_configure(self, _e=None) -> None:
+        # 防抖：拖拽分隔条/缩放时避免右栏卡片反复销毁重建导致闪烁
+        job = getattr(self, "_canvas_cfg_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._canvas_cfg_job = self.root.after(90, lambda: self.redraw(refresh_out=False))
     def _build_single_preprocess_strip(self, parent: ttk.Frame) -> None:
         """单源：可选「素材 → 预处理成品目录 → 再裂变到各方案」。"""
         wrap = ttk.LabelFrame(parent, text="单源 · 可选预处理（勾选后 = 单源→预处理→多方案）", padding=6)
@@ -636,37 +711,36 @@ class FissionMindmapPanel:
             self._on_pp_toggle()
 
     def _build_source_groups_panel(self, parent: ttk.Frame) -> None:
-        """多源专用：可滚动 + 每组可折叠的一列列表。"""
-        wrap = ttk.LabelFrame(
-            parent,
-            text="多源素材组（点 ▶ 展开设置 · 设完可收起）",
-            padding=6,
-        )
-        wrap.pack(fill=X)
-        self._sg_wrap = wrap
-        self._sg_expanded: dict[str, bool] = getattr(self, "_sg_expanded", {}) or {}
+        """多源专用：左栏全高可滚动源组列表。"""
+        parent.rowconfigure(1, weight=1)
+        parent.columnconfigure(0, weight=1)
 
-        head = ttk.Frame(wrap)
-        head.pack(fill=X)
+        head = ttk.Frame(parent)
+        head.grid(row=0, column=0, sticky="ew", padx=6, pady=(8, 4))
+        ttk.Label(head, text="① 源素材组", font=("Microsoft YaHei", 10, "bold")).pack(anchor="w")
         ttk.Label(
-            head,
-            text="一列列表 · 滚轮可滚动 · 箭头收起/展开",
-            foreground="gray", font=("", 8),
-        ).pack(side=LEFT)
-        make_button(head, "全部收起", self._collapse_all_source_groups, kind="outline", width=8).pack(side=RIGHT, padx=2)
-        make_button(head, "＋ 添加源组", self._add_source_group, kind="outline", width=10).pack(side=RIGHT)
+            head, text="每组：输入 → 预处理(可选) → 勾选方案",
+            foreground="gray", font=("", 8), wraplength=230,
+        ).pack(anchor="w")
+        btn_row = ttk.Frame(head)
+        btn_row.pack(fill=X, pady=(6, 0))
+        make_button(btn_row, "＋ 添加", self._add_source_group, kind="outline", width=8).pack(side=LEFT)
+        make_button(btn_row, "全部收起", self._collapse_all_source_groups, kind="outline", width=8).pack(
+            side=LEFT, padx=4,
+        )
 
-        # 固定可视高度 + 滚动条（之前滚不动是没绑滚轮）
-        list_shell = ttk.Frame(wrap)
-        list_shell.pack(fill=X, pady=(6, 0))
-        canvas = tk.Canvas(list_shell, height=150, highlightthickness=0)
+        list_shell = ttk.Frame(parent)
+        list_shell.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 6))
+        list_shell.rowconfigure(0, weight=1)
+        list_shell.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(list_shell, highlightthickness=0)
         vsb = ttk.Scrollbar(list_shell, orient="vertical", command=canvas.yview)
         self._sg_inner = ttk.Frame(canvas)
         self._sg_canvas = canvas
         self._sg_canvas_win = canvas.create_window((0, 0), window=self._sg_inner, anchor="nw")
         canvas.configure(yscrollcommand=vsb.set)
-        canvas.pack(side=LEFT, fill=X, expand=True)
-        vsb.pack(side=RIGHT, fill=Y)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
 
         def _sync_scroll(_e=None):
             canvas.update_idletasks()
@@ -682,7 +756,6 @@ class FissionMindmapPanel:
         canvas.bind("<Configure>", _sync_scroll)
 
         def _on_mousewheel(event):
-            # Windows: event.delta 通常是 ±120
             try:
                 if event.delta:
                     canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -712,7 +785,7 @@ class FissionMindmapPanel:
         self._sg_cards = []
         self._ensure_default_source_groups()
         self._rebuild_source_group_cards()
-
+        self._hook_folder_drop(parent)
     def _collapse_all_source_groups(self) -> None:
         self.sync_groups_to_plan()
         plan = getattr(self.app, "_fission_plan", None)

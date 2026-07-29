@@ -2120,8 +2120,21 @@ class VideoBatchTool:
     def _list_videos(self, folder):
         if not folder or not os.path.isdir(folder):
             return []
-        return sorted(f for f in os.listdir(folder)
-                      if os.path.isfile(os.path.join(folder, f)) and f.lower().endswith(VIDEO_EXTS))
+        out = []
+        for f in os.listdir(folder):
+            full = os.path.join(folder, f)
+            if not os.path.isfile(full):
+                continue
+            if not f.lower().endswith(VIDEO_EXTS):
+                continue
+            # 排除批处理中间文件，避免被当成素材扫进去（会导致狂抽坏帧、极慢）
+            low = f.lower()
+            if low.startswith("temp_") or low.startswith("habi_preview"):
+                continue
+            if ".habi_part." in low:
+                continue
+            out.append(f)
+        return sorted(out)
 
     def _list_rename_files(self, folder):
         if not folder or not os.path.isdir(folder):

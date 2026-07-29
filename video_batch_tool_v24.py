@@ -16,7 +16,7 @@ import json
 import os
 import tkinter as tk
 from pathlib import Path
-from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, X, Y, Canvas, Frame, StringVar, TclError, filedialog, messagebox, ttk
+from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, X, Y, BooleanVar, Canvas, Frame, StringVar, TclError, filedialog, messagebox, ttk
 
 import video_batch_tool_v20 as v20
 from modules import asset_library as alib

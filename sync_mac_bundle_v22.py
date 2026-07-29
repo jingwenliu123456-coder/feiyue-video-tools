@@ -93,9 +93,11 @@ def main() -> None:
     marker.write_text(
         "Synced from Windows workspace for V22 macOS packaging.\n"
         f"Time: {datetime.now().isoformat(timespec='seconds')}\n"
-        "Includes: v20/v21/v22 + core/modules/ui + naming_tool\n"
-        "Layer/endcard (浮层落版) comes from video_batch_tool_v21.apply_overlay_endcard.\n"
-        "On Mac: ./setup_and_build_mac.sh\n",
+        "Product: 飞跃视频工具 V22（纯批处理，不含 V23/V24 裂变）\n"
+        "Includes: v20/v21/v22 + core/modules/ui + naming_tool + folder_drop\n"
+        "Layer/endcard: video_batch_tool_v21.apply_overlay_endcard\n"
+        "On Mac: chmod +x setup_and_build_mac.sh && ./setup_and_build_mac.sh\n"
+        "Output: dist/HabiVideoTool_macOS/ (HabiVideoTool.app + HabiNamingTool.app)\n",
         encoding="utf-8",
     )
     print(f"  wrote {marker.name}")

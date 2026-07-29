@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 echo "============================================"
-echo "  Habi 视频批处理工具 V22 - macOS 打包"
+echo "  飞跃视频工具 V22 - macOS 打包"
 echo "============================================"
 echo
 
@@ -12,17 +12,22 @@ if ! command -v python3 &>/dev/null; then
   exit 1
 fi
 
-echo "[1/5] 检查 PyInstaller / ttkbootstrap..."
+echo "[1/5] 检查 PyInstaller / ttkbootstrap / tkinterdnd2..."
 if ! python3 -m pip show pyinstaller &>/dev/null; then
-  python3 -m pip install pyinstaller pillow ttkbootstrap
+  python3 -m pip install pyinstaller pillow ttkbootstrap tkinterdnd2
 else
-  python3 -m pip install -q pillow ttkbootstrap
+  python3 -m pip install -q pillow ttkbootstrap tkinterdnd2
 fi
 if ! python3 -c "import ttkbootstrap" &>/dev/null; then
   echo "[错误] 无法 import ttkbootstrap（主题库）。请: python3 -m pip install ttkbootstrap"
   exit 1
 fi
 echo "  OK: ttkbootstrap"
+if python3 -c "import tkinterdnd2" &>/dev/null; then
+  echo "  OK: tkinterdnd2（可拖入文件夹）"
+else
+  echo "  [提示] 未装 tkinterdnd2，安装包内将仅支持点击添加文件夹"
+fi
 
 echo "[2/5] 检查 FFmpeg..."
 if [[ ! -f "ffmpeg_mac" ]]; then

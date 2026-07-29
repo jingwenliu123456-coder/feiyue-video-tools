@@ -39,8 +39,8 @@ V22_MODULE_LABELS: dict[str, str] = {
     "cut": "视频裁切",
     "enhance": "画质增强",
     "ratio": "比例适配",
-    "mov_wm": "MOV水印",
-    "png_wm": "PNG水印",
+    "mov_wm": "动态水印",
+    "png_wm": "静态水印",
     "layer": "浮层落版",
     "ending": "拼接落版",
     "preview_canvas": "视频预览",
@@ -310,9 +310,11 @@ class VideoBatchToolV22(_V21):
         ttk.Label(
             body,
             text="为每个格子选择功能模块（同一模块不可重复）。\n"
-                 "批处理/试跑会按「从上到下、从左到右」执行已启用的功能；「视频预览」不参与处理。\n"
-                 "保存后请重启 V22，界面布局即生效。",
-            wraplength=460,
+                 "批处理会按「从上到下、从左到右」执行已勾选功能；「视频预览」不参与处理。\n"
+                 "格子可以留「（空）」表示不放模块——空格子没问题。\n"
+                 "但已勾选的功能必须配好素材路径，路径空着开始处理会被拦截并提示。\n"
+                 "保存后请重启程序，界面布局才生效。",
+            wraplength=480,
         ).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
 
         grid = self._layout_to_grid()
@@ -412,6 +414,8 @@ class VideoBatchToolV22(_V21):
 
     def _hook_preview_refresh_traces(self) -> None:
         def _schedule_overlay(*_a):
+            if getattr(self, "_ui_batch_quiet", False) or getattr(self, "_fission_running", False):
+                return
             if self._preview_overlay_job:
                 try:
                     self.root.after_cancel(self._preview_overlay_job)
@@ -420,6 +424,8 @@ class VideoBatchToolV22(_V21):
             self._preview_overlay_job = self.root.after(180, self._refresh_preview_overlays)
 
         def _schedule_full(*_a):
+            if getattr(self, "_ui_batch_quiet", False) or getattr(self, "_fission_running", False):
+                return
             if hasattr(self, "_preview_canvas"):
                 self.root.after(350, self._render_preview)
 
@@ -881,12 +887,20 @@ class VideoBatchToolV22(_V21):
         return True
 
     def _render_preview(self) -> None:
+        # 裂变/批处理切方案时会狂改输入路径；禁止此时抽帧，否则会卡死主线程（日志里大量 moov/坏 temp_）
+        if getattr(self, "_ui_batch_quiet", False) or getattr(self, "_fission_running", False):
+            return
         self._preview_scrub_job = None
         vp = self._pick_preview_video()
         if not vp:
             self._preview_hint_var.set("未检测到输入视频")
             self._preview_duration = 0.0
             self._update_preview_timeline()
+            return
+        # 再挡一层：中间文件不当预览源
+        base = os.path.basename(vp).lower()
+        if base.startswith("temp_") or ".habi_part." in base:
+            self._preview_hint_var.set("跳过临时文件预览")
             return
         self._preview_duration = self._get_preview_video_duration(vp)
         self._sync_preview_scale()

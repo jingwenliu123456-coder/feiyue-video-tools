@@ -23,6 +23,7 @@ from modules.naming_convention import (
     COMBO_SEP,
     CUSTOM_OPTION,
     DEFAULT_TAG_LIBRARY,
+    DEFAULT_TEMPLATE,
     DESIGNER_PRESETS,
     IMAGE_EXTS,
     LANG_PRESETS,
@@ -49,6 +50,7 @@ from modules.naming_convention import (
     today_date_str,
     upgrade_custom_tags_by_type,
     validate_regex_patterns,
+    validate_template,
     validate_tags_for_execute,
 )
 from modules.output_naming import append_rename_file
@@ -57,8 +59,10 @@ from modules.platform_utils import (
 )
 
 DEFAULT_MIDDLE = "-{品牌}-video-{语言}-{类型}-{标签}-{尺寸}-{日期}-{设计师}"
+DEFAULT_TEMPLATE = "{序号}" + DEFAULT_MIDDLE
 
 MIDDLE_CHIP_VARS = [
+    ("序号", "{序号}"),
     ("品牌", "{品牌}"),
     ("语言", "{语言}"),
     ("类型", "{类型}"),
@@ -91,12 +95,20 @@ BATCH_FIELD_LABELS = [label for label, _ in BATCH_FIELD_OPTIONS]
 
 def template_to_middle(full: str) -> str:
     t = strip_template_extension((full or "").strip())
-    if t.startswith("{序号}"):
-        t = t[len("{序号}"):]
+    # 支持 {序号} 在模板任意位置出现
+    t = t.replace("{序号}", "")
     if not t:
         return DEFAULT_MIDDLE
     if not t.startswith("-"):
         t = "-" + t
+    return t
+
+
+def clean_template_text(s: str) -> str:
+    """清理「完整模板」文本：只做轻量规范化，不强行移动/裁掉 {序号}。"""
+    t = (s or "").strip()
+    while "--" in t:
+        t = t.replace("--", "-")
     return t
 
 
@@ -121,12 +133,9 @@ def media_ext_hint() -> str:
 
 
 def middle_has_error(middle: str) -> bool:
-    m = (middle or "").strip()
-    if not m:
-        return True
-    if "--" in m:
-        return True
-    return bool(WIN_ILLEGAL.search(m))
+    # 兼容旧命名逻辑：此处把输入当作「完整模板」文本来校验 {序号}。
+    err = validate_template((middle or "").strip())
+    return bool(err)
 
 
 def default_tags_by_type_local() -> dict[str, list[str]]:
@@ -270,7 +279,8 @@ class NamingToolApp:
 
         self.folder_var = tk.StringVar()
         self.start_var = tk.StringVar(value="1")
-        self.middle_var = tk.StringVar(value=DEFAULT_MIDDLE)
+        # middle_var 实际承载「完整模板」：用户可把 {序号} 放在任意位置
+        self.middle_var = tk.StringVar(value=DEFAULT_TEMPLATE)
         self.full_preview_var = tk.StringVar()
         self.brand_custom_var = tk.StringVar()
         self.lang_custom_var = tk.StringVar()
@@ -483,7 +493,7 @@ class NamingToolApp:
         self._trace(self.start_var)
 
         tpl_card, _, r2 = self._naming_card(
-            upper, "命名模板（序号自动，扩展名沿用原文件）", "📝", "naming_template",
+            upper, "命名模板（{序号}位置可编辑，扩展名沿用原文件）", "📝", "naming_template",
         )
         tpl_card.grid(row=1, column=0, sticky="ew", padx=self._pad["sm"], pady=self._pad["sm"])
         r2.columnconfigure(1, weight=1)
@@ -491,7 +501,7 @@ class NamingToolApp:
         tpl_row = ttk.Frame(r2)
         tpl_row.grid(row=0, column=0, columnspan=3, sticky="ew")
         tpl_row.columnconfigure(1, weight=1)
-        ttk.Label(tpl_row, text="{序号}-", foreground="gray").grid(row=0, column=0, sticky="w")
+        ttk.Label(tpl_row, text="模板:", foreground="gray").grid(row=0, column=0, sticky="w")
         self.middle_entry = tk.Entry(tpl_row, textvariable=self.middle_var, font=("", 10))
         self.middle_entry.grid(row=0, column=1, sticky="ew", padx=4)
         ttk.Label(tpl_row, text="+原扩展名", foreground="gray").grid(row=0, column=2, sticky="w")
@@ -1094,7 +1104,7 @@ class NamingToolApp:
         messagebox.showinfo("完成", f"成功 {ok} 个，失败/跳过 {fail} 个")
 
     def _full_template(self) -> str:
-        return middle_to_full(self.middle_var.get())
+        return strip_template_extension((self.middle_var.get() or "").strip()) or DEFAULT_TEMPLATE
 
     def _index_width(self) -> int:
         try:
@@ -1259,7 +1269,7 @@ class NamingToolApp:
         self._refresh_preview()
 
     def _on_middle_focus_out(self, _e=None) -> None:
-        cleaned = clean_middle(self.middle_var.get())
+        cleaned = clean_template_text(self.middle_var.get())
         if cleaned != self.middle_var.get():
             self.middle_var.set(cleaned)
 
@@ -1285,7 +1295,7 @@ class NamingToolApp:
             pass
 
     def _reset_template(self) -> None:
-        self.middle_var.set(DEFAULT_MIDDLE)
+        self.middle_var.set(DEFAULT_TEMPLATE)
 
     def _save_preset(self) -> None:
         name = simpledialog.askstring("保存预设", "预设名称:", parent=self.root)
@@ -1293,7 +1303,7 @@ class NamingToolApp:
             return
         name = name.strip()
         self._saved_presets = [p for p in self._saved_presets if p.get("name") != name]
-        self._saved_presets.append({"name": name, "template_middle": self.middle_var.get()})
+        self._saved_presets.append({"name": name, "template": self.middle_var.get()})
         self._update_preset_combo()
         self._schedule_save()
         messagebox.showinfo("完成", f"已保存预设「{name}」")
@@ -1302,8 +1312,13 @@ class NamingToolApp:
         name = self.preset_combo.get()
         for p in self._saved_presets:
             if p.get("name") == name:
+                tpl = p.get("template")
+                if tpl:
+                    self.middle_var.set(str(tpl))
+                    return
+                # 兼容旧预设：template_middle 存的是「序号后面部分」
                 mid = p.get("template_middle") or template_to_middle(p.get("template", ""))
-                self.middle_var.set(mid or DEFAULT_MIDDLE)
+                self.middle_var.set(middle_to_full(str(mid or DEFAULT_MIDDLE)) or DEFAULT_TEMPLATE)
                 return
 
     def _update_preset_combo(self) -> None:
@@ -1587,7 +1602,8 @@ class NamingToolApp:
             "start_index": self._start_index(),
             "index_digits": self._index_width(),
             "date_format": self._date_format(),
-            "template_middle": clean_middle(self.middle_var.get()),
+            # 保留旧配置字段：template_middle 代表「{序号} 移除后得到的中间片段」
+            "template_middle": template_to_middle(self._full_template()),
             "template": self._full_template(),
             "brand_preset": self.brand_combo.get() if self.brand_combo.get() in set(self._brand_options) else "habi",
             "brand_custom": self.brand_custom_var.get().strip() if self.brand_combo.get() == CUSTOM_OPTION else "",
@@ -1630,8 +1646,12 @@ class NamingToolApp:
             self.start_var.set(str(cfg.get("start_index", 1)))
             self.index_digits_var.set(str(cfg.get("index_digits", 2)))
             self.date_format_var.set(str(cfg.get("date_format", "4")))
-            mid = cfg.get("template_middle") or template_to_middle(str(cfg.get("template", "")))
-            self.middle_var.set(mid or DEFAULT_MIDDLE)
+            tpl = str(cfg.get("template") or "").strip()
+            if tpl:
+                self.middle_var.set(tpl)
+            else:
+                mid = cfg.get("template_middle") or template_to_middle(str(cfg.get("template", "")))
+                self.middle_var.set(middle_to_full(str(mid or DEFAULT_MIDDLE)) or DEFAULT_TEMPLATE)
             self._brand_options = self._load_field_options(cfg, "brand_options", BRAND_PRESETS, "brand_extra")
             self._lang_options = self._load_field_options(cfg, "lang_options", LANG_PRESETS, "lang_extra")
             self._type_options = self._load_field_options(cfg, "type_options", TYPE_PRESETS, "type_extra")
@@ -2480,12 +2500,12 @@ class NamingToolApp:
                 )
             return
         if middle_has_error(self.middle_var.get()):
-            msg = "命名模板有误（中间红框）— 请点「重置默认」"
+            msg = "命名模板有误（{序号}缺失或非法字符）— 请点「重置默认」"
             self._set_preview_status(msg)
             if notify:
                 messagebox.showwarning(
                     "提示",
-                    "命名模板有误（中间输入框红框），预览已跳过。\n"
+                    "命名模板有误（输入框红框），预览已跳过。\n"
                     "请点「重置默认」或删除非法字符 \\ / : * ? \" < > |",
                 )
             return
@@ -2582,12 +2602,9 @@ class NamingToolApp:
         if not folder:
             messagebox.showwarning("提示", "请选择文件夹")
             return
-        mid = clean_middle(self.middle_var.get())
-        if not mid or mid == "-":
-            messagebox.showwarning("提示", "中间模板不能为空")
-            return
-        if middle_has_error(mid):
-            messagebox.showwarning("提示", "模板格式有误，请检查中间区域（红色边框处）")
+        tpl = clean_template_text(self.middle_var.get())
+        if middle_has_error(tpl):
+            messagebox.showwarning("提示", "模板格式有误，请检查输入框（红色边框处）")
             return
         if not self._validate_legacy_regex(notify=True):
             return
