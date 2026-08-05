@@ -14,49 +14,30 @@ from modules.fission_engine import (
     FissionSourceGroup,
     MAX_SOURCE_GROUPS,
     bind_fission_io_paths,
+    explicit_branch_selection,
+    merge_branch_selection_after_plan_change,
     list_template_names,
     new_group_id,
     sanitize_branch_name,
     source_group_from_dict,
     source_group_to_dict,
 )
+from modules.platform_utils import ui_collapse_chevron, ui_gear_glyph, ui_gear_hint, ui_list_item, ui_pause_label, ui_stop_label
 from modules.ui_skin import make_button
+from ui.app_theme import (
+    APP_SKIN_LABELS,
+    APP_SKIN_ORDER,
+    FISSION_SKIN_LABELS,
+    all_theme_dicts,
+    checkbox_selectcolor,
+    is_none_skin,
+    theme_for_label,
+)
 
-# ---------- 四套主题（方案色偏柔和，少荧光） ----------
 _THEMES: dict[str, dict[str, Any]] = {
-    "cream": {
-        "label": "奶油可爱",
-        "bg": "#FFF9F5", "card": "#FFFFFF", "border": "#F0D9CC",
-        "text": "#5C4B51", "muted": "#9B8B8F", "center": "#E8A0AE", "check": "#7BAE7F",
-        "line": "#E8D0C4", "scheme_fill": True,
-        "scheme": ["#B8D4C8", "#B4C9DC", "#C9B8D0", "#E8CDB0", "#E0B4B4", "#C5D4E0", "#DCC4CE"],
-        "folder": ["#E0B4B4", "#E8CDB0", "#B8D4C8", "#B4C9DC", "#C9B8D0", "#DCC4CE"],
-    },
-    "blue": {
-        "label": "经典蓝白",
-        "bg": "#F0F4F8", "card": "#FFFFFF", "border": "#D0DCEC",
-        "text": "#1E3A5F", "muted": "#64748B", "center": "#5B8FC7", "check": "#5A9A6A",
-        "line": "#B8CCE0", "scheme_fill": True,
-        "scheme": ["#7BA3C9", "#8B9BC7", "#9B8FBF", "#C99BB0", "#C9A07A", "#7BB0C4", "#7BAE8A"],
-        "folder": ["#7BA3C9", "#8B9BC7", "#C99BB0", "#C9A07A", "#7BAE8A", "#9B8FBF"],
-    },
-    "dark": {
-        "label": "黑紫赛博",
-        "bg": "#0A0A0F", "card": "#12121A", "border": "#2D2D44",
-        "text": "#E8E8F0", "muted": "#9CA3AF", "center": "#8B6BB5", "check": "#5A9A6A",
-        "line": "#4A4A60", "scheme_fill": False,
-        "scheme": ["#8B6BB5", "#6B7AB5", "#B56B8F", "#7A6BB5", "#5B9AAA", "#B59A5B", "#5BAAA0"],
-        "folder": ["#B58A5B", "#B56B6B", "#5BAAA0", "#B5A55B", "#6B8AB5", "#8B6BB5"],
-    },
-    "green": {
-        "label": "绿黄养眼",
-        "bg": "#F5F7F0", "card": "#FFFFFF", "border": "#D2DEC4",
-        "text": "#3A4A32", "muted": "#6E7A62", "center": "#7FA86A", "check": "#6B9A5A",
-        "line": "#C5D4B0", "scheme_fill": True,
-        "scheme": ["#9CB88A", "#C4B67A", "#8AAD7E", "#C9B06A", "#7AAD8E", "#A8C090", "#B8A86A"],
-        "folder": ["#9CB88A", "#C4B67A", "#8AAD7E", "#C9B06A", "#7AAD8E", "#A8C090"],
-    },
+    k: v for k, v in all_theme_dicts().items() if k != "none"
 }
+FISSION_SKIN_ORDER = tuple(k for k in APP_SKIN_ORDER if k != "none")
 
 
 def _basename(p: Any) -> str:
@@ -73,10 +54,6 @@ def _detail_cut(cfg: dict) -> str:
 
 def _detail_ratio(cfg: dict) -> str:
     return f"比例:{cfg.get('ratio_target', '9:16')}"
-
-
-def _detail_enhance(cfg: dict) -> str:
-    return str(cfg.get("enhance_mode") or "锐化降噪")
 
 
 def _detail_png(cfg: dict) -> str:
@@ -116,7 +93,6 @@ def _detail_overlay(cfg: dict) -> str:
 # (enable_key, label, feature_jump_key, detail_fn)
 _FUNC_DEFS: list[tuple[str, str, str, Callable[[dict], str]]] = [
     ("cut_enable", "视频裁切", "cut", _detail_cut),
-    ("enhance_enable", "画质增强", "enhance", _detail_enhance),
     ("ratio_enable", "比例适配", "ratio", _detail_ratio),
     ("enable_mov_watermark", "动态水印", "mov_wm", _detail_mov),
     ("png_wm_enable", "静态水印", "png_wm", _detail_png),
@@ -137,17 +113,24 @@ class FissionMindmapPanel:
         self._selected_idx: Optional[int] = None
         self._hover_idx: Optional[int] = None
         self._progress: dict[str, tuple[float, str]] = {}
+        self._run_progress: dict[str, Any] = {
+            "phase": "", "file": "", "file_idx": 0, "file_total": 0, "pct": 0.0,
+        }
         self._view = StringVar(value="mindmap")
-        self._theme_key = StringVar(value=_THEMES["cream"]["label"])
+        self._theme_key = StringVar(value=_THEMES["workbench"]["label"])
         self._layout_mode = StringVar(value="思维导图")  # 思维导图 | 地铁线路
         self._io_mode = StringVar(value="单源")  # 单源 | 多源 —— 两套界面分开
         self._folders: list[str] = []
+        self._sg_last_branch_names: list[str] = []
         self._hit_regions: list[tuple[Any, ...]] = []
         self._add_popup: Optional[tk.Toplevel] = None
         self._drag: Optional[dict[str, Any]] = None
-        self.th = _THEMES["cream"]
+        self.th = _THEMES["workbench"]
+        self._out_follow_preprocess = True
+        self._pp_base_out_root = ""
+        self._out_root_syncing = False
 
-        self.frame = ttk.Frame(parent)
+        self.frame = tk.Frame(parent, bg=self.th["bg"])
         self.frame.pack(fill=BOTH, expand=True)
 
         top = ttk.Frame(self.frame)
@@ -180,8 +163,8 @@ class FissionMindmapPanel:
 
         ttk.Label(top, text="皮肤").pack(side=RIGHT, padx=(8, 2))
         skin = ttk.Combobox(
-            top, textvariable=self._theme_key, width=12, state="readonly",
-            values=[_THEMES[k]["label"] for k in _THEMES],
+            top, textvariable=self._theme_key, width=14, state="readonly",
+            values=APP_SKIN_LABELS,
         )
         skin.pack(side=RIGHT)
         skin.bind("<<ComboboxSelected>>", lambda _e: self._on_skin_selected())
@@ -223,11 +206,18 @@ class FissionMindmapPanel:
         if not isinstance(pref, dict):
             return
         theme_label = str(pref.get("default_theme") or "").strip()
-        if theme_label:
-            labels = [_THEMES[k]["label"] for k in _THEMES]
-            if theme_label in labels:
-                self._theme_key.set(theme_label)
+        if theme_label in APP_SKIN_LABELS:
+            self._theme_key.set(theme_label)
+            if hasattr(self.app, "_apply_app_skin"):
+                try:
+                    self.app._apply_app_skin(theme_label, from_fission=True)
+                except Exception:
+                    self._apply_theme()
+            else:
                 self._apply_theme()
+        elif theme_label:
+            self._theme_key.set(_THEMES["workbench"]["label"])
+            self._apply_theme()
         view = str(pref.get("default_view") or "").strip()
         io = str(pref.get("fission_io_mode") or "").strip()
         if io in ("单源", "多源"):
@@ -245,7 +235,7 @@ class FissionMindmapPanel:
                     self._pp_temp_mode.set(mode)
                 self._pp_temp_path.set(str(pref.get("fission_preprocess_temp_path") or ""))
                 self._refresh_pp_templates()
-                self._on_pp_toggle()
+                self._on_pp_enable_toggle()
             except Exception:
                 pass
         if view == "列表":
@@ -264,12 +254,35 @@ class FissionMindmapPanel:
             pass
 
     def _on_skin_selected(self) -> None:
-        self._apply_theme()
+        label = self._theme_key.get()
+        app = self.app
+        if hasattr(app, "_apply_app_skin"):
+            try:
+                app._apply_app_skin(label, from_fission=True)
+            except Exception:
+                self._apply_theme()
+        else:
+            self._apply_theme()
         try:
             from modules import habi_memory
-            habi_memory.update_prefs(default_theme=self._theme_key.get())
+            habi_memory.update_prefs(default_theme=label)
         except Exception:
             pass
+
+    def on_plan_loaded(self) -> None:
+        """加载裂变组合 JSON 后刷新画布与源组。"""
+        plan = getattr(self.app, "_fission_plan", None)
+        self._sg_expanded = {}
+        if plan is not None and plan.source_groups:
+            for g in plan.source_groups:
+                if g.group_id:
+                    self._sg_expanded[g.group_id] = True
+        self._sync_folders_from_app()
+        self._rebuild_folder_list()
+        self._apply_io_mode_ui()
+        if hasattr(self, "_rebuild_source_group_cards"):
+            self._rebuild_source_group_cards()
+        self._after_plan_change()
 
     def ensure_scheme_from_template(self, template_name: str) -> bool:
         """快速启动：若画布尚无该模板方案，则挂上一条（不重复添加）。"""
@@ -287,24 +300,293 @@ class FissionMindmapPanel:
         self._quick_add_from_template(name)
         return True
 
+    def _theme_is_dark(self) -> bool:
+        try:
+            from modules.ui_skin import is_dark_color
+            return is_dark_color(str(self.th.get("bg") or "#F2F2F7"))
+        except Exception:
+            return False
+
+    def _checkbutton(
+        self,
+        parent: tk.Misc,
+        text: str,
+        variable: tk.Variable,
+        *,
+        command: Callable[[], None] | None = None,
+    ) -> tk.Checkbutton:
+        """原生对勾勾选框：勾选区用主题 check 色（勾选变色）。"""
+        th = self.th
+        bg = th["bg"]
+        select = checkbox_selectcolor(th)
+        return tk.Checkbutton(
+            parent,
+            text=text,
+            variable=variable,
+            command=command,
+            bg=bg,
+            fg=th["text"],
+            activebackground=bg,
+            activeforeground=th["text"],
+            selectcolor=select,
+            highlightthickness=1,
+            highlightbackground=th["border"],
+            highlightcolor=th["border"],
+            bd=0,
+            anchor="w",
+            font=("Microsoft YaHei", 10),
+        )
+
+    def _refresh_fission_checkbuttons(self, widget: tk.Misc, *, depth: int = 0) -> None:
+        if depth > 50:
+            return
+        if isinstance(widget, tk.Checkbutton):
+            th = self.th
+            try:
+                widget.configure(
+                    bg=th["bg"],
+                    fg=th["text"],
+                    activebackground=th["bg"],
+                    activeforeground=th["text"],
+                    selectcolor=checkbox_selectcolor(th),
+                    highlightbackground=th["border"],
+                    highlightcolor=th["border"],
+                )
+            except tk.TclError:
+                pass
+        for child in widget.winfo_children():
+            self._refresh_fission_checkbuttons(child, depth=depth + 1)
+
+    def _configure_fission_ttk_styles(self, key: str, th: dict[str, Any]) -> str:
+        prefix = f"Fission.{key}"
+        st = ttk.Style(self.root)
+        bg, card = th["bg"], th["card"]
+        try:
+            st.configure(f"{prefix}.TFrame", background=bg)
+            st.configure(f"{prefix}.Card.TFrame", background=card)
+            st.configure(f"{prefix}.TLabel", background=bg, foreground=th["text"])
+            st.configure(f"{prefix}.Muted.TLabel", background=bg, foreground=th["muted"])
+            st.configure(
+                f"{prefix}.Title.TLabel",
+                background=bg,
+                foreground=th["text"],
+                font=("Microsoft YaHei", 12, "bold"),
+            )
+            st.configure(f"{prefix}.Section.TLabel", background=bg, foreground=th["text"], font=("Microsoft YaHei", 10, "bold"))
+            st.configure(f"{prefix}.TRadiobutton", background=bg, foreground=th["text"])
+            st.map(
+                f"{prefix}.TRadiobutton",
+                background=[("active", bg), ("!active", bg), ("selected", bg)],
+                foreground=[("active", th["text"]), ("!active", th["text"]), ("selected", th["text"])],
+            )
+            st.configure(f"{prefix}.TCheckbutton", background=bg, foreground=th["text"])
+            st.map(
+                f"{prefix}.TCheckbutton",
+                background=[("active", bg), ("!active", bg), ("selected", bg)],
+            )
+            st.configure(f"{prefix}.TLabelFrame", background=bg, foreground=th["text"], bordercolor=th["border"])
+            st.configure(f"{prefix}.TLabelFrame.Label", background=bg, foreground=th["text"])
+            from ui.workbench_skin import SASH_THICKNESS
+
+            st.configure(
+                f"{prefix}.TPanedwindow",
+                background=th["bg"],
+                sashthickness=SASH_THICKNESS,
+                sashpad=0,
+            )
+            st.map(f"{prefix}.TPanedwindow", background=[("active", th.get("border", th["line"]))])
+            st.configure(f"{prefix}.Host.TFrame", background=bg)
+            st.configure(f"{prefix}.TEntry", fieldbackground=card, foreground=th["text"], insertcolor=th["text"])
+            st.configure(
+                f"{prefix}.TCombobox",
+                fieldbackground=card,
+                background=card,
+                foreground=th["text"],
+                arrowcolor=th["text"],
+            )
+            st.configure(
+                f"{prefix}.Treeview",
+                background=card,
+                fieldbackground=card,
+                foreground=th["text"],
+                bordercolor=th["border"],
+            )
+            st.configure(
+                f"{prefix}.Treeview.Heading",
+                background=bg,
+                foreground=th["text"],
+                relief="flat",
+            )
+            st.configure(
+                f"{prefix}.TProgressbar",
+                troughcolor=th["border"],
+                background=th["center"],
+                bordercolor=th["border"],
+            )
+            from ui.workbench_skin import _ensure_progressbar_layouts
+
+            _ensure_progressbar_layouts(st, f"{prefix}.TProgressbar")
+            st.configure(f"{prefix}.Vertical.TScrollbar", troughcolor=bg, background=th["border"])
+            st.configure(f"{prefix}.Horizontal.TScrollbar", troughcolor=bg, background=th["border"])
+        except tk.TclError:
+            pass
+        return prefix
+
+    def _fission_style_for_label(self, widget: ttk.Label, prefix: str) -> str:
+        th = self.th
+        try:
+            fg = str(widget.cget("foreground") or "").lower()
+            font = str(widget.cget("font") or "")
+        except tk.TclError:
+            return f"{prefix}.TLabel"
+        if fg in ("gray", th["muted"].lower(), "#808080", "grey"):
+            return f"{prefix}.Muted.TLabel"
+        if "bold" in font:
+            if "12" in font or "13" in font:
+                return f"{prefix}.Title.TLabel"
+            return f"{prefix}.Section.TLabel"
+        return f"{prefix}.TLabel"
+
+    def _apply_fission_ttk_styles(self, widget: tk.Misc, prefix: str, *, depth: int = 0) -> None:
+        if depth > 50:
+            return
+        try:
+            cls = widget.winfo_class()
+            if cls == "TFrame":
+                widget.configure(style=f"{prefix}.TFrame")
+            elif cls == "TLabel":
+                widget.configure(style=self._fission_style_for_label(widget, prefix))
+            elif cls == "TRadiobutton":
+                widget.configure(style=f"{prefix}.TRadiobutton")
+            elif cls == "TCheckbutton":
+                widget.configure(style=f"{prefix}.TCheckbutton")
+            elif cls == "TLabelFrame":
+                widget.configure(style=f"{prefix}.TLabelFrame")
+            elif cls == "TPanedwindow":
+                widget.configure(style=f"{prefix}.TPanedwindow")
+            elif cls == "TEntry":
+                widget.configure(style=f"{prefix}.TEntry")
+            elif cls == "TCombobox":
+                widget.configure(style=f"{prefix}.TCombobox")
+            elif cls == "Treeview":
+                widget.configure(style=f"{prefix}.Treeview")
+            elif cls == "TProgressbar":
+                widget.configure(style=f"{prefix}.TProgressbar")
+            elif cls == "TScrollbar":
+                try:
+                    orient = widget.cget("orient")
+                except tk.TclError:
+                    orient = "vertical"
+                axis = "Vertical" if orient == "vertical" else "Horizontal"
+                widget.configure(style=f"{prefix}.{axis}.TScrollbar")
+        except tk.TclError:
+            pass
+        for child in widget.winfo_children():
+            self._apply_fission_ttk_styles(child, prefix, depth=depth + 1)
+
+    def _fission_color_map(self) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for th in _THEMES.values():
+            for key in ("bg", "card", "border", "text", "muted", "center", "check", "line"):
+                val = str(th.get(key) or "")
+                if val:
+                    mapping[val.lower()] = key
+        return mapping
+
+    def _recolor_fission_tk_tree(self, widget: tk.Misc, old_th: dict, new_th: dict, *, depth: int = 0) -> None:
+        if depth > 50:
+            return
+        color_map = self._fission_color_map()
+        try:
+            if isinstance(widget, tk.Canvas):
+                bg = str(widget.cget("bg") or "").lower()
+                key = color_map.get(bg)
+                if key and key in new_th:
+                    widget.configure(bg=new_th[key])
+            elif isinstance(widget, tk.Checkbutton):
+                bg = str(widget.cget("bg") or "").lower()
+                key = color_map.get(bg)
+                if key and key in new_th:
+                    widget.configure(bg=new_th[key])
+                fg = str(widget.cget("fg") or "").lower()
+                fg_key = color_map.get(fg)
+                if fg_key and fg_key in new_th:
+                    widget.configure(fg=new_th[fg_key])
+                select = checkbox_selectcolor(new_th)
+                for opt in ("activebackground", "activeforeground"):
+                    try:
+                        v = str(widget.cget(opt) or "").lower()
+                        v_key = color_map.get(v)
+                        if v_key and v_key in new_th:
+                            widget.configure(**{opt: new_th[v_key]})
+                    except tk.TclError:
+                        pass
+                try:
+                    widget.configure(
+                        selectcolor=select,
+                        highlightbackground=new_th.get("border", "#636366"),
+                        highlightcolor=new_th.get("border", "#636366"),
+                    )
+                except tk.TclError:
+                    pass
+            elif isinstance(widget, (tk.Frame, tk.Label, tk.Button, tk.Entry)):
+                bg = str(widget.cget("bg") or "").lower()
+                key = color_map.get(bg)
+                if key and key in new_th:
+                    widget.configure(bg=new_th[key])
+                fg = str(widget.cget("fg") or "").lower()
+                fg_key = color_map.get(fg)
+                if fg_key and fg_key in new_th:
+                    widget.configure(fg=new_th[fg_key])
+                if isinstance(widget, tk.Entry):
+                    ib = str(widget.cget("insertbackground") or "").lower()
+                    ib_key = color_map.get(ib)
+                    if ib_key and ib_key in new_th:
+                        widget.configure(insertbackground=new_th[ib_key])
+        except tk.TclError:
+            pass
+        for child in widget.winfo_children():
+            self._recolor_fission_tk_tree(child, old_th, new_th, depth=depth + 1)
+
     def _apply_theme(self) -> None:
         label = self._theme_key.get()
-        key = next((k for k, v in _THEMES.items() if v["label"] == label), "cream")
-        self.th = _THEMES[key]
+        old_th = dict(getattr(self, "th", _THEMES["workbench"]))
+        if is_none_skin(label):
+            self.th = theme_for_label(label)
+            key = "workbench"
+        else:
+            key = next((k for k in FISSION_SKIN_ORDER if _THEMES[k]["label"] == label), "workbench")
+            self.th = dict(_THEMES[key])
         th = self.th
-        if hasattr(self, "canvas"):
-            self.canvas.configure(bg=th["bg"])
-        if hasattr(self, "_drop_lbl"):
-            self._drop_lbl.configure(bg=th["card"], fg=th["muted"])
+
+        prefix = self._configure_fission_ttk_styles(key, th)
+        self._fission_style_prefix = prefix
+        self._apply_fission_ttk_styles(self.frame, prefix)
+        host = getattr(self.app, "_fission_host", None)
+        if host is not None:
+            try:
+                host.configure(style=f"{prefix}.Host.TFrame")
+            except Exception:
+                pass
+
+        self._recolor_fission_tk_tree(self.frame, old_th, th)
+        self._refresh_fission_checkbuttons(self.frame)
         for attr, kw in (
             ("_right_outer", {"bg": th["bg"]}),
+            ("_action_bar", {"bg": th["bg"]}),
+            ("frame", {"bg": th["bg"]}),
             ("_right_title", {"bg": th["bg"], "fg": th["text"]}),
             ("_right_sub", {"bg": th["bg"], "fg": th["muted"]}),
             ("_out_box", {"bg": th["bg"]}),
+            ("_out_follow_hint", {"bg": th["bg"], "fg": th["muted"]}),
             ("_out_hint", {"bg": th["bg"], "fg": th["muted"]}),
             ("_out_sec_title", {"bg": th["bg"], "fg": th["text"]}),
             ("_out_host", {"bg": th["bg"]}),
             ("_out_entry", {"bg": th["card"], "fg": th["text"], "insertbackground": th["text"]}),
+            ("_func_lib_shell", {"bg": th["card"]}),
+            ("_func_lib_title", {"bg": th["card"], "fg": th["muted"]}),
+            ("_func_lib_scheme", {"bg": th["card"], "fg": th["muted"]}),
+            ("_func_lib_host", {"bg": th["card"]}),
         ):
             w = getattr(self, attr, None)
             if w is not None:
@@ -312,6 +594,30 @@ class FissionMindmapPanel:
                     w.configure(**kw)
                 except Exception:
                     pass
+        if hasattr(self, "_tip"):
+            try:
+                self._tip.configure(foreground=th["muted"])
+            except Exception:
+                pass
+        if hasattr(self, "_sg_canvas"):
+            try:
+                self._sg_canvas.configure(bg=th["bg"])
+            except Exception:
+                pass
+        if hasattr(self, "canvas"):
+            self.canvas.configure(bg=th["bg"])
+        if hasattr(self, "_out_canvas"):
+            try:
+                self._out_canvas.configure(bg=th["bg"])
+            except Exception:
+                pass
+        if hasattr(self, "_folder_canvas"):
+            try:
+                self._folder_canvas.configure(bg=th["bg"])
+            except Exception:
+                pass
+        if hasattr(self, "_drop_lbl"):
+            self._drop_lbl.configure(bg=th["card"], fg=th["muted"])
         self._rebuild_folder_list()
         if self._view.get() == "mindmap":
             if self._layout_mode.get() == "地铁线路":
@@ -354,6 +660,11 @@ class FissionMindmapPanel:
         paned.add(mid, weight=5)
         paned.add(self._right_outer, weight=1)
         try:
+            paned.pane(left, minsize=220)
+            paned.pane(self._right_outer, minsize=200)
+        except Exception:
+            pass
+        try:
             paned.pane(left, weight=1)
             paned.pane(mid, weight=5)
             paned.pane(self._right_outer, weight=1)
@@ -376,25 +687,56 @@ class FissionMindmapPanel:
         self._left_multi_host.grid_remove()
 
         single = self._left_single_host
-        ttk.Label(single, text="① 输入文件夹", font=("Microsoft YaHei", 10, "bold")).pack(
-            anchor="w", padx=8, pady=(8, 2),
+        single.rowconfigure(2, weight=1)
+        single.columnconfigure(0, weight=1)
+
+        head = ttk.Frame(single)
+        head.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        ttk.Label(head, text="① 输入文件夹", font=("Microsoft YaHei", 10, "bold")).pack(
+            anchor="w",
         )
-        ttk.Label(single, text="主文件夹排最上 · 可拖入", foreground="gray", font=("", 8)).pack(
-            anchor="w", padx=8,
+        ttk.Label(head, text="主文件夹排最上 · 可拖入", foreground="gray", font=("", 8)).pack(
+            anchor="w",
         )
-        self._folder_host = ttk.Frame(single)
-        self._folder_host.pack(fill=BOTH, expand=True, padx=6, pady=6)
-        make_button(single, "＋ 添加文件夹", self._add_folder, kind="outline").pack(fill=X, padx=8, pady=(0, 4))
+
+        actions = ttk.Frame(single)
+        actions.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))
+        make_button(actions, "＋ 添加文件夹", self._add_folder, kind="outline").pack(fill=X, pady=(0, 4))
         drop = tk.Label(
-            single, text="拖入文件夹到这里\n或点击添加", bg=self.th["card"], fg=self.th["muted"],
-            relief="groove", bd=1, pady=12, justify=tk.CENTER,
+            actions, text="拖入文件夹到这里\n或点击添加", bg=self.th["card"], fg=self.th["muted"],
+            relief="groove", bd=1, pady=10, justify=tk.CENTER,
         )
-        drop.pack(fill=X, padx=8, pady=(0, 8))
+        drop.pack(fill=X)
         drop.bind("<Button-1>", lambda _e: self._add_folder())
         self._drop_lbl = drop
         self._hook_folder_drop(drop)
-        self._hook_folder_drop(self._folder_host)
-        self._hook_folder_drop(single)
+
+        list_shell = ttk.Frame(single)
+        list_shell.grid(row=2, column=0, sticky="nsew", padx=6, pady=(0, 8))
+        list_shell.rowconfigure(0, weight=1)
+        list_shell.columnconfigure(0, weight=1)
+        from ui.workbench_skin import bind_canvas_vscroll, make_tk_vscrollbar
+
+        self._folder_canvas = tk.Canvas(list_shell, highlightthickness=0, bg=self.th["bg"])
+        folder_vsb = make_tk_vscrollbar(list_shell, command=self._folder_canvas.yview)
+        self._folder_host = tk.Frame(self._folder_canvas, bg=self.th["bg"])
+        self._folder_canvas_win = self._folder_canvas.create_window((0, 0), window=self._folder_host, anchor="nw")
+        bind_canvas_vscroll(self._folder_canvas, folder_vsb, autohide=True)
+        self._folder_canvas.grid(row=0, column=0, sticky="nsew")
+        folder_vsb.grid(row=0, column=1, sticky="ns")
+
+        def _sync_folder_scroll(_e=None) -> None:
+            try:
+                self._folder_canvas.configure(scrollregion=self._folder_canvas.bbox("all"))
+                self._folder_canvas.itemconfig(
+                    self._folder_canvas_win, width=max(self._folder_canvas.winfo_width(), 1),
+                )
+            except Exception:
+                pass
+
+        self._folder_host.bind("<Configure>", _sync_folder_scroll)
+        self._folder_canvas.bind("<Configure>", _sync_folder_scroll)
+        self._sync_folder_scroll = _sync_folder_scroll
 
         self._build_source_groups_panel(self._left_multi_host)
 
@@ -423,8 +765,10 @@ class FissionMindmapPanel:
 
         canvas_wrap = ttk.Frame(self._mid_split)
         self.canvas = tk.Canvas(canvas_wrap, bg=self.th["bg"], highlightthickness=0)
-        ysb = ttk.Scrollbar(canvas_wrap, orient="vertical", command=self.canvas.yview)
-        xsb = ttk.Scrollbar(canvas_wrap, orient="horizontal", command=self.canvas.xview)
+        from ui.workbench_skin import make_tk_hscrollbar, make_tk_vscrollbar
+
+        ysb = make_tk_vscrollbar(canvas_wrap, command=self.canvas.yview)
+        xsb = make_tk_hscrollbar(canvas_wrap, command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         ysb.grid(row=0, column=1, sticky="ns")
@@ -474,9 +818,22 @@ class FissionMindmapPanel:
         row.pack(fill=X)
         make_button(row, "选择…", self._pick_output_root, kind="outline", width=7).pack(side=LEFT)
         make_button(row, "打开", self.app.open_global_output, kind="outline", width=5).pack(side=LEFT, padx=4)
+        make_button(row, "跟随预处理", self._enable_out_follow_preprocess, kind="outline", width=9).pack(
+            side=LEFT, padx=(0, 4),
+        )
+        self._out_follow_hint = tk.Label(
+            out_box, text="", bg=self.th["bg"], fg=self.th["muted"],
+            font=("", 8), wraplength=210, justify="left",
+        )
+        self._out_follow_hint.pack(anchor="w", pady=(2, 0))
         self._out_hint = tk.Label(out_box, text="", bg=self.th["bg"], fg=self.th["muted"], font=("", 8), wraplength=210, justify="left")
         self._out_hint.pack(anchor="w", pady=(4, 0))
+        try:
+            self._out_root_var.trace_add("write", self._on_out_root_var_changed)
+        except Exception:
+            pass
         self._refresh_out_root_hint()
+        self._update_out_follow_hint()
 
         self._out_sec_title = tk.Label(
             right, text="各方案输出", bg=self.th["bg"], fg=self.th["text"],
@@ -487,10 +844,12 @@ class FissionMindmapPanel:
         out_shell = tk.Frame(right, bg=self.th["bg"])
         out_shell.pack(fill=BOTH, expand=True, padx=4, pady=(0, 4))
         self._out_canvas = tk.Canvas(out_shell, bg=self.th["bg"], highlightthickness=0)
-        out_vsb = ttk.Scrollbar(out_shell, orient="vertical", command=self._out_canvas.yview)
+        from ui.workbench_skin import bind_canvas_vscroll, make_tk_vscrollbar
+
+        out_vsb = make_tk_vscrollbar(out_shell, command=self._out_canvas.yview)
         self._out_host = tk.Frame(self._out_canvas, bg=self.th["bg"])
         self._out_canvas_win = self._out_canvas.create_window((0, 0), window=self._out_host, anchor="nw")
-        self._out_canvas.configure(yscrollcommand=out_vsb.set)
+        bind_canvas_vscroll(self._out_canvas, out_vsb, autohide=False)
         self._out_canvas.pack(side=LEFT, fill=BOTH, expand=True)
         out_vsb.pack(side=RIGHT, fill=Y)
 
@@ -510,16 +869,44 @@ class FissionMindmapPanel:
         # 右栏就绪后再切布局 / 首次绘制
         self._on_layout_change()
 
-        bar = ttk.Frame(parent)
+        bar = tk.Frame(parent, bg=self.th["bg"])
         bar.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        make_button(bar, "应用方案", self._apply_selected, kind="info").pack(side=LEFT, padx=4)
+        self._action_bar = bar
+        self._run_status_var = StringVar(value="就绪")
+        prog_row = ttk.Frame(bar)
+        prog_row.pack(side=LEFT, fill=X, expand=True, padx=(0, 8))
+        ttk.Label(prog_row, textvariable=self._run_status_var, foreground="gray").pack(anchor="w")
+        self._run_progress_bar = ttk.Progressbar(prog_row, orient="horizontal", mode="determinate", maximum=100)
+        self._run_progress_bar.pack(fill=X, pady=(2, 0))
         make_button(bar, "新建方案", self._create_new_scheme, kind="outline").pack(side=LEFT, padx=4)
-        make_button(bar, "编辑方案", self._edit_selected, kind="outline").pack(side=LEFT, padx=4)
+        make_button(bar, "保存组合", self._save_plan_combo, kind="outline").pack(side=LEFT, padx=2)
+        make_button(bar, "加载组合", self._load_plan_combo, kind="outline").pack(side=LEFT, padx=2)
         # 右下角：开始处理在「打开规范命名」左边（pack RIGHT 先放的在最右）
         make_button(bar, "打开规范命名", self._open_naming_for_output, kind="outline").pack(side=RIGHT, padx=4)
+        self.app._fission_stop_btn = make_button(
+            bar, ui_stop_label(), self.app._ui_batch_stop, kind="danger",
+        )
+        self.app._fission_stop_btn.pack(side=RIGHT, padx=2)
+        self.app._fission_pause_btn = make_button(
+            bar, ui_pause_label(paused=False), self.app._toggle_pause, kind="outline",
+        )
+        self.app._fission_pause_btn.pack(side=RIGHT, padx=2)
         make_button(bar, "开始处理", self.app.start_fission, kind="success").pack(side=RIGHT, padx=4)
+        try:
+            self.app._refresh_run_control_buttons()
+        except Exception:
+            pass
 
     # ----- 单源 / 多源 模式 -----
+
+    def _save_plan_combo(self) -> None:
+        if hasattr(self.app, "_fission_save_plan"):
+            self.sync_groups_to_plan()
+            self.app._fission_save_plan()
+
+    def _load_plan_combo(self) -> None:
+        if hasattr(self.app, "_fission_load_plan"):
+            self.app._fission_load_plan()
 
     def _on_io_mode_change(self) -> None:
         self._apply_io_mode_ui()
@@ -627,9 +1014,9 @@ class FissionMindmapPanel:
 
         row = ttk.Frame(wrap)
         row.pack(fill=X)
-        ttk.Checkbutton(
+        self._checkbutton(
             row, text="启用预处理",
-            variable=self._pp_enable, command=self._on_pp_toggle,
+            variable=self._pp_enable, command=self._on_pp_enable_toggle,
         ).pack(side=LEFT)
         ttk.Label(row, text="模板").pack(side=LEFT, padx=(8, 2))
         self._pp_tpl_cb = ttk.Combobox(row, textvariable=self._pp_template, width=22, state="disabled")
@@ -671,15 +1058,153 @@ class FissionMindmapPanel:
         except Exception:
             pass
 
+    def refresh_template_catalog(self) -> None:
+        """批处理页保存/删方案模板后调用：刷新预处理下拉与多源组模板列表（无需重启）。"""
+        self._refresh_pp_templates()
+        names = self._tpl_names()
+        for card in getattr(self, "_sg_cards", []) or []:
+            cb = card.get("pp_tpl_cb")
+            if cb is not None:
+                try:
+                    cb["values"] = names
+                except Exception:
+                    pass
+
+    def _pp_preprocess_dict(self) -> dict[str, str]:
+        return {
+            "temp_mode": (self._pp_temp_mode.get() or "保留").strip(),
+            "temp_path": (self._pp_temp_path.get() or "").strip(),
+            "template": (self._pp_template.get() or "").strip(),
+        }
+
+    def _pp_base_out_root(self) -> str:
+        base = (getattr(self, "_pp_base_out_root", "") or "").strip()
+        if base:
+            return base
+        cur = (self.app.global_output_folder.get() or "").strip()
+        if not cur:
+            return ""
+        name = os.path.basename(cur.rstrip("\\/"))
+        if name.startswith("_预处理_"):
+            return str(Path(cur).parent)
+        return cur
+
+    def _resolve_pp_product_dir(self) -> str:
+        if not bool(self._pp_enable.get()):
+            return ""
+        pp = self._pp_preprocess_dict()
+        mode = pp["temp_mode"]
+        if mode == "指定路径":
+            return pp["temp_path"]
+        base = self._pp_base_out_root()
+        if not base:
+            return ""
+        try:
+            resolver = getattr(self.app, "_resolve_preprocess_temp_dir", None)
+            if callable(resolver):
+                return str(resolver(base, pp))
+        except Exception:
+            pass
+        tpl = sanitize_branch_name(pp["template"]) or "预处理"
+        return str(Path(base) / f"_预处理_{tpl}")
+
+    def _sync_out_root_from_preprocess(self) -> None:
+        if not getattr(self, "_out_follow_preprocess", True):
+            return
+        if not bool(self._pp_enable.get()):
+            return
+        product = self._resolve_pp_product_dir()
+        if not product:
+            self._update_out_follow_hint()
+            return
+        pp = self._pp_preprocess_dict()
+        if pp["temp_mode"] != "指定路径":
+            base = self._pp_base_out_root()
+            if base:
+                self._pp_base_out_root = base
+        self._out_root_syncing = True
+        try:
+            self.app.global_output_folder.set(product)
+        finally:
+            self._out_root_syncing = False
+        self._refresh_out_root_hint()
+        self._update_out_follow_hint()
+        try:
+            self.redraw()
+        except Exception:
+            pass
+
+    def _update_out_follow_hint(self) -> None:
+        lbl = getattr(self, "_out_follow_hint", None)
+        if lbl is None:
+            return
+        if not bool(getattr(self, "_pp_enable", tk.BooleanVar(value=False)).get()):
+            lbl.config(text="")
+            return
+        if getattr(self, "_out_follow_preprocess", True):
+            product = self._resolve_pp_product_dir()
+            if product:
+                lbl.config(text=f"↳ 已跟随预处理成品：{product}")
+            else:
+                lbl.config(text="↳ 已开启跟随；请选模板或指定成品目录")
+        else:
+            lbl.config(text="↳ 已手动指定输出根（点「跟随预处理」恢复自动同步）")
+
+    def _on_out_root_var_changed(self, *_a) -> None:
+        if getattr(self, "_out_root_syncing", False):
+            return
+        if not bool(getattr(self, "_pp_enable", tk.BooleanVar(value=False)).get()):
+            return
+        self._out_follow_preprocess = False
+        cur = (self.app.global_output_folder.get() or "").strip()
+        mode = (getattr(self, "_pp_temp_mode", StringVar(value="")).get() or "").strip()
+        if mode != "指定路径" and cur:
+            name = os.path.basename(cur.rstrip("\\/"))
+            if name.startswith("_预处理_"):
+                self._pp_base_out_root = str(Path(cur).parent)
+            else:
+                self._pp_base_out_root = cur
+        self._update_out_follow_hint()
+        try:
+            self._on_pp_toggle()
+        except Exception:
+            pass
+
+    def _enable_out_follow_preprocess(self) -> None:
+        if not bool(getattr(self, "_pp_enable", tk.BooleanVar(value=False)).get()):
+            messagebox.showinfo("提示", "请先勾选「启用预处理」", parent=self.root)
+            return
+        self._out_follow_preprocess = True
+        if not (self._pp_base_out_root or "").strip():
+            cur = (self.app.global_output_folder.get() or "").strip()
+            if cur:
+                name = os.path.basename(cur.rstrip("\\/"))
+                self._pp_base_out_root = str(Path(cur).parent) if name.startswith("_预处理_") else cur
+        self._sync_out_root_from_preprocess()
+
     def _pp_default_product_dir(self) -> str:
-        out = (self.app.global_output_folder.get() or "").strip()
+        if bool(getattr(self, "_pp_enable", tk.BooleanVar(value=False)).get()):
+            resolved = self._resolve_pp_product_dir()
+            if resolved:
+                return resolved
+        out = self._pp_base_out_root() or (self.app.global_output_folder.get() or "").strip()
         tpl = sanitize_branch_name((self._pp_template.get() or "").strip()) or "预处理模板"
         if not out:
-            return f"（先在右侧选输出根，成品 → 输出根/_预处理_{tpl}）"
+            return f"（先选输出根或指定成品目录，默认 → 输出根/_预处理_{tpl}）"
         return str(Path(out) / f"_预处理_{tpl}")
+
+    def _on_pp_enable_toggle(self) -> None:
+        if bool(self._pp_enable.get()):
+            self._out_follow_preprocess = True
+        self._on_pp_toggle()
 
     def _on_pp_toggle(self) -> None:
         on = bool(self._pp_enable.get())
+        if on and not (self._pp_base_out_root or "").strip():
+            cur = (self.app.global_output_folder.get() or "").strip()
+            if cur:
+                name = os.path.basename(cur.rstrip("\\/"))
+                self._pp_base_out_root = str(Path(cur).parent) if name.startswith("_预处理_") else cur
         st = "readonly" if on else "disabled"
         try:
             self._pp_tpl_cb.configure(state=st)
@@ -702,12 +1227,15 @@ class FissionMindmapPanel:
             self._pp_path_hint.set(
                 f"预处理成品目录：{self._pp_default_product_dir()}  （保留，方便你检查）"
             )
+        self._sync_out_root_from_preprocess()
+        self._update_out_follow_hint()
 
     def _browse_pp_temp(self) -> None:
         p = filedialog.askdirectory(parent=self.root, title="选择预处理成品文件夹")
         if p:
             self._pp_temp_path.set(p)
             self._pp_temp_mode.set("指定路径")
+            self._out_follow_preprocess = True
             self._on_pp_toggle()
 
     def _build_source_groups_panel(self, parent: ttk.Frame) -> None:
@@ -728,13 +1256,27 @@ class FissionMindmapPanel:
         make_button(btn_row, "全部收起", self._collapse_all_source_groups, kind="outline", width=8).pack(
             side=LEFT, padx=4,
         )
+        sg_drop = tk.Label(
+            head,
+            text="拖入文件夹到此处",
+            bg=self.th["card"],
+            fg=self.th["muted"],
+            relief="groove",
+            bd=1,
+            pady=6,
+            cursor="hand2",
+        )
+        sg_drop.pack(fill=X, pady=(6, 0))
+        self._hook_folder_drop(sg_drop)
 
         list_shell = ttk.Frame(parent)
         list_shell.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 6))
         list_shell.rowconfigure(0, weight=1)
         list_shell.columnconfigure(0, weight=1)
-        canvas = tk.Canvas(list_shell, highlightthickness=0)
-        vsb = ttk.Scrollbar(list_shell, orient="vertical", command=canvas.yview)
+        canvas = tk.Canvas(list_shell, highlightthickness=0, bg=self.th["bg"])
+        from ui.workbench_skin import make_tk_vscrollbar
+
+        vsb = make_tk_vscrollbar(list_shell, command=canvas.yview)
         self._sg_inner = ttk.Frame(canvas)
         self._sg_canvas = canvas
         self._sg_canvas_win = canvas.create_window((0, 0), window=self._sg_inner, anchor="nw")
@@ -755,37 +1297,15 @@ class FissionMindmapPanel:
         self._sg_inner.bind("<Configure>", _sync_scroll)
         canvas.bind("<Configure>", _sync_scroll)
 
-        def _on_mousewheel(event):
-            try:
-                if event.delta:
-                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                elif getattr(event, "num", None) == 4:
-                    canvas.yview_scroll(-1, "units")
-                elif getattr(event, "num", None) == 5:
-                    canvas.yview_scroll(1, "units")
-            except Exception:
-                pass
-            return "break"
+        from ui.workbench_skin import register_scroll_wheel
 
-        def _bind_wheel(_e=None):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
-            canvas.bind_all("<Button-4>", _on_mousewheel)
-            canvas.bind_all("<Button-5>", _on_mousewheel)
-
-        def _unbind_wheel(_e=None):
-            canvas.unbind_all("<MouseWheel>")
-            canvas.unbind_all("<Button-4>")
-            canvas.unbind_all("<Button-5>")
-
-        canvas.bind("<Enter>", _bind_wheel)
-        canvas.bind("<Leave>", _unbind_wheel)
-        self._sg_inner.bind("<Enter>", _bind_wheel)
+        register_scroll_wheel(canvas, canvas.master, self._sg_inner)
         self._sg_sync_scroll = _sync_scroll
 
         self._sg_cards = []
         self._ensure_default_source_groups()
         self._rebuild_source_group_cards()
-        self._hook_folder_drop(parent)
+
     def _collapse_all_source_groups(self) -> None:
         self.sync_groups_to_plan()
         plan = getattr(self.app, "_fission_plan", None)
@@ -913,12 +1433,12 @@ class FissionMindmapPanel:
         # ---- 折叠标题行（始终可见）----
         head = ttk.Frame(card)
         head.pack(fill=X)
-        arrow = "▼" if expanded else "▶"
+        arrow = ui_collapse_chevron(expanded=expanded)
         make_button(
             head, arrow, lambda i=gid: self._toggle_source_group_expand(i),
             kind="outline", width=3,
         ).pack(side=LEFT, padx=(0, 4))
-        ttk.Checkbutton(head, text=f"组{idx + 1}", variable=en_var).pack(side=LEFT)
+        self._checkbutton(head, text=f"组{idx + 1}", variable=en_var).pack(side=LEFT)
         ttk.Entry(head, textvariable=title_var, width=12).pack(side=LEFT, padx=4)
         summary_var = StringVar(value="")
         summary_lbl = ttk.Label(head, textvariable=summary_var, foreground="gray", font=("", 8))
@@ -959,8 +1479,9 @@ class FissionMindmapPanel:
 
         r3 = ttk.Frame(body)
         r3.pack(fill=X, pady=2)
-        ttk.Checkbutton(r3, text="预处理", variable=pp_en, command=lambda: _refresh_summary()).pack(side=LEFT)
-        ttk.Combobox(r3, textvariable=pp_tpl, values=tpls, width=22, state="readonly").pack(side=LEFT, padx=4)
+        self._checkbutton(r3, text="预处理", variable=pp_en, command=lambda: _refresh_summary()).pack(side=LEFT)
+        pp_tpl_cb = ttk.Combobox(r3, textvariable=pp_tpl, values=tpls, width=22, state="readonly")
+        pp_tpl_cb.pack(side=LEFT, padx=4)
         ttk.Label(r3, text="成品", foreground="gray", font=("", 8)).pack(side=LEFT)
         ttk.Combobox(
             r3, textvariable=pp_mode, width=10, state="readonly",
@@ -979,18 +1500,21 @@ class FissionMindmapPanel:
         r4 = ttk.Frame(body)
         r4.pack(fill=X, pady=(4, 0))
         ttk.Label(r4, text="裂变方案").pack(side=LEFT)
-        ttk.Label(r4, text="（不勾=全部已启用方案）", foreground="gray", font=("", 8)).pack(side=LEFT, padx=4)
+        ttk.Label(r4, text="（新加方案默认不勾；请按需勾选）", foreground="gray", font=("", 8)).pack(side=LEFT, padx=4)
         cb_host = ttk.Frame(body)
         cb_host.pack(fill=X)
-        selected = set(g.selected_branch_names or [])
+        selected_names = explicit_branch_selection(
+            g.selected_branch_names, branch_names, legacy_empty_means_all=True,
+        )
+        selected = set(selected_names)
         branch_vars: dict[str, tk.BooleanVar] = {}
         if not branch_names:
             ttk.Label(cb_host, text="方案库为空：请先在画布添加方案", foreground="gray").pack(anchor="w")
         else:
             for bn in branch_names:
-                bv = tk.BooleanVar(value=(bn in selected) if selected else True)
+                bv = tk.BooleanVar(value=(bn in selected))
                 branch_vars[bn] = bv
-                ttk.Checkbutton(cb_host, text=bn, variable=bv, command=lambda: _refresh_summary()).pack(
+                self._checkbutton(cb_host, text=bn, variable=bv, command=lambda: _refresh_summary()).pack(
                     side=LEFT, padx=4, pady=1,
                 )
 
@@ -1011,7 +1535,10 @@ class FissionMindmapPanel:
 
         # 收起时标题行右侧提示「点箭头展开」
         if not expanded:
-            ttk.Label(card, text="点左侧 ▶ 展开详细设置", foreground="gray", font=("", 8)).pack(
+            from modules.platform_utils import is_mac
+
+            hint = "点左侧 > 展开详细设置" if is_mac() else "点左侧 ▶ 展开详细设置"
+            ttk.Label(card, text=hint, foreground="gray", font=("", 8)).pack(
                 anchor="w", padx=28,
             )
 
@@ -1023,6 +1550,7 @@ class FissionMindmapPanel:
             "output": out_var,
             "pp_en": pp_en,
             "pp_tpl": pp_tpl,
+            "pp_tpl_cb": pp_tpl_cb,
             "pp_mode": pp_mode,
             "pp_path": pp_path,
             "branch_vars": branch_vars,
@@ -1033,9 +1561,6 @@ class FissionMindmapPanel:
         for card in self._sg_cards:
             bvars = card.get("branch_vars") or {}
             selected = [n for n, v in bvars.items() if bool(v.get())]
-            # 若全勾选，存空列表表示「全部」
-            if bvars and len(selected) == len(bvars):
-                selected = []
             out.append(FissionSourceGroup(
                 group_id=str(card.get("group_id") or new_group_id()),
                 enabled=bool(card["enabled"].get()),
@@ -1119,11 +1644,12 @@ class FissionMindmapPanel:
             return
         n = len(plan.source_groups) + 1
         out = (self.app.global_output_folder.get() or "").strip()
+        all_branches = [b.branch_name for b in self._branch_list()]
         g = FissionSourceGroup(
             group_id=new_group_id(),
             title=f"源组{n}",
             output_folder=out,
-            selected_branch_names=[],
+            selected_branch_names=list(all_branches),
         )
         # 新组展开，其它收起，方便看见刚加的那一行
         for old in plan.source_groups:
@@ -1195,6 +1721,9 @@ class FissionMindmapPanel:
         path = filedialog.askdirectory(parent=self.root, title="选择裂变输出总文件夹")
         if not path:
             return
+        self._out_follow_preprocess = False
+        if bool(getattr(self, "_pp_enable", tk.BooleanVar(value=False)).get()):
+            self._pp_base_out_root = path
         self.app.global_output_folder.set(path)
         if not os.path.isdir(path):
             try:
@@ -1203,6 +1732,7 @@ class FissionMindmapPanel:
                 messagebox.showerror("错误", f"无法创建文件夹：{exc}", parent=self.root)
                 return
         self._refresh_out_root_hint()
+        self._update_out_follow_hint()
         try:
             if hasattr(self, "_on_pp_toggle"):
                 self._on_pp_toggle()
@@ -1237,9 +1767,12 @@ class FissionMindmapPanel:
         try:
             from modules.folder_drop import hook_folder_drop
 
-            ok = hook_folder_drop(widget, self._on_folders_dropped)
-            if not ok and widget is getattr(self, "_drop_lbl", None):
-                self._drop_lbl.config(text="点击添加文件夹（本机暂不支持拖入）")
+            def _register() -> None:
+                ok = hook_folder_drop(widget, self._on_folders_dropped)
+                if not ok and widget is getattr(self, "_drop_lbl", None):
+                    self._drop_lbl.config(text="点击添加文件夹（需 pip install windnd）")
+
+            self.root.after_idle(_register)
         except Exception:
             pass
 
@@ -1254,9 +1787,16 @@ class FissionMindmapPanel:
                 added += 1
         if not self._folders:
             return
-        self._push_primary_folder()
-        if added:
-            self._toast(f"已加入 {added} 个文件夹")
+
+        def _finish() -> None:
+            self._push_primary_folder()
+            if added:
+                self._toast(f"已加入 {added} 个文件夹")
+
+        try:
+            self.root.after_idle(_finish)
+        except Exception:
+            _finish()
 
     def _open_naming_for_output(self) -> None:
         """打开规范命名并指向裂变输出根（含子文件夹扫描）。"""
@@ -1291,44 +1831,102 @@ class FissionMindmapPanel:
             w.destroy()
         if not self._folders:
             ttk.Label(host, text="还没有文件夹", foreground="gray").pack(anchor="w", pady=8)
+            sync = getattr(self, "_sync_folder_scroll", None)
+            if callable(sync):
+                sync()
             return
+        count_labels: list[tuple[int, str, tk.Label]] = []
         for i, path in enumerate(self._folders):
             color = self.th["folder"][i % len(self.th["folder"])]
             name = os.path.basename(path.rstrip("\\/")) or path
-            try:
-                n = len(self.app._list_videos(path))
-            except Exception:
-                n = 0
+            if len(name) > 20:
+                name = name[:18] + "…"
             card_bg = self.th["card"]
             muted = self.th["muted"]
-            row = tk.Frame(host, bg=card_bg, highlightthickness=1, highlightbackground=self.th["border"])
-            row.pack(fill=X, pady=4)
-            # 左侧彩色贴纸
-            sticker = tk.Frame(row, bg=color, width=10)
-            sticker.pack(side=LEFT, fill=Y, padx=(0, 4))
-            sticker.pack_propagate(False)
+            text = self.th["text"]
+            border = self.th["border"]
+            row = tk.Frame(host, bg=card_bg, highlightthickness=1, highlightbackground=border)
+            row.pack(fill=X, pady=3)
+            row.columnconfigure(1, weight=1)
+            row.columnconfigure(2, minsize=58, weight=0)
+
+            sticker = tk.Frame(row, bg=color, width=4)
+            sticker.grid(row=0, column=0, sticky="ns")
+
             body = tk.Frame(row, bg=card_bg)
-            body.pack(side=LEFT, fill=BOTH, expand=True, padx=2, pady=4)
-            tk.Label(body, text=name, bg=card_bg, fg=self.th["text"], font=("Microsoft YaHei", 9, "bold")).pack(anchor="w", padx=4)
-            tk.Label(body, text=f"{n} 个视频", bg=card_bg, fg=muted, font=("", 8)).pack(anchor="w", padx=4, pady=(0, 2))
+            body.grid(row=0, column=1, sticky="nsew", padx=(8, 4), pady=6)
+
+            tk.Label(
+                body, text=name, bg=card_bg, fg=text,
+                font=("Microsoft YaHei", 10, "bold"), anchor="w",
+            ).pack(fill=X)
+            count_lbl = tk.Label(
+                body, text="…", bg=card_bg, fg=muted,
+                font=("Microsoft YaHei", 9), anchor="w",
+            )
+            count_lbl.pack(fill=X, pady=(2, 0))
+            count_labels.append((i, path, count_lbl))
+
+            ctrl = tk.Frame(row, bg=card_bg)
+            ctrl.grid(row=0, column=2, sticky="ne", padx=(0, 6), pady=4)
+
             tk.Button(
-                row, text="×", bg="#FF8FA3", fg="white", bd=0, width=2, font=("", 9, "bold"), cursor="hand2",
+                ctrl, text="×", bg="#FF8FA3", fg="white", bd=0, width=2, height=1,
+                font=("", 9, "bold"), cursor="hand2",
                 command=lambda idx=i: self._remove_folder(idx),
-            ).place(relx=1.0, x=-22, y=2, width=18, height=18)
-            arrows = tk.Frame(row, bg=card_bg)
-            arrows.pack(side=RIGHT, padx=(2, 4), pady=4)
+            ).grid(row=0, column=0, columnspan=2, sticky="e")
+            nav = tk.Frame(ctrl, bg=card_bg)
+            nav.grid(row=1, column=0, columnspan=2, sticky="e", pady=(2, 0))
             tk.Button(
-                arrows, text="▲", width=2, font=("", 7), bg=card_bg, fg=muted, bd=1,
-                relief="solid", highlightbackground=self.th["border"], cursor="hand2",
+                nav, text="▲", width=2, height=1, font=("", 7), bg=card_bg, fg=muted, bd=1,
+                relief="solid", highlightbackground=border, cursor="hand2",
                 command=lambda idx=i: self._move_folder(idx, -1),
                 state=tk.DISABLED if i == 0 else tk.NORMAL,
-            ).pack()
+            ).pack(side=LEFT)
             tk.Button(
-                arrows, text="▼", width=2, font=("", 7), bg=card_bg, fg=muted, bd=1,
+                nav, text="▼", width=2, height=1, font=("", 7), bg=card_bg, fg=muted, bd=1,
                 relief="solid", cursor="hand2",
                 command=lambda idx=i: self._move_folder(idx, 1),
                 state=tk.DISABLED if i == len(self._folders) - 1 else tk.NORMAL,
-            ).pack()
+            ).pack(side=LEFT, padx=(2, 0))
+
+        sync = getattr(self, "_sync_folder_scroll", None)
+        if callable(sync):
+            sync()
+        if count_labels:
+            self.root.after_idle(lambda labels=count_labels: self._async_fill_folder_counts(labels))
+
+    def _async_fill_folder_counts(self, labels: list[tuple[int, str, tk.Label]]) -> None:
+        import threading
+
+        def _worker() -> None:
+            results: list[tuple[int, str, int]] = []
+            for i, path, _lbl in labels:
+                try:
+                    n = len(self.app._list_videos(path))
+                except Exception:
+                    n = 0
+                results.append((i, path, n))
+
+            def _apply() -> None:
+                by_idx = {i: (p, lbl) for i, p, lbl in labels}
+                for i, path, n in results:
+                    entry = by_idx.get(i)
+                    if not entry or entry[0] != path:
+                        continue
+                    lbl = entry[1]
+                    try:
+                        if lbl.winfo_exists():
+                            lbl.config(text=f"{n} 个视频")
+                    except tk.TclError:
+                        pass
+
+            try:
+                self.root.after(0, _apply)
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, name="fission-folder-count", daemon=True).start()
 
     # ----- 分支数据 -----
 
@@ -1525,17 +2123,30 @@ class FissionMindmapPanel:
                     self.app.fission_tree.selection_set(str(self._selected_idx))
                 except Exception:
                     pass
-        if self._layout_mode.get() == "地铁线路":
-            self._rebuild_func_lib()
-        # 方案库变更后，多源模式下刷新各组勾选列表
+        # 方案库变更后，多源模式下合并各组勾选（新方案默认不勾）
         try:
             if self._io_mode.get() == "多源":
-                if hasattr(self, "_sg_cards") and self._sg_cards:
+                plan = getattr(self.app, "_fission_plan", None)
+                if plan is not None and hasattr(self, "_sg_cards") and self._sg_cards:
                     self.sync_groups_to_plan()
+                    new_names = [b.branch_name for b in self._branch_list()]
+                    old_names = getattr(self, "_sg_last_branch_names", None) or new_names
+                    if new_names != old_names:
+                        for g in plan.source_groups:
+                            g.selected_branch_names = merge_branch_selection_after_plan_change(
+                                list(g.selected_branch_names or []),
+                                list(old_names),
+                                list(new_names),
+                            )
+                    self._sg_last_branch_names = list(new_names)
                 if hasattr(self, "_rebuild_source_group_cards"):
                     self._rebuild_source_group_cards()
+            else:
+                self._sg_last_branch_names = [b.branch_name for b in self._branch_list()]
         except Exception:
             pass
+        if self._layout_mode.get() == "地铁线路":
+            self._rebuild_func_lib()
         self.redraw()
 
     # ----- 绘制 -----
@@ -1776,7 +2387,7 @@ class FissionMindmapPanel:
                     c.create_text(tx1 + 6, sy + 7, text=detail_show, fill=th["muted"], font=("Microsoft YaHei", 8), anchor="w")
                 else:
                     c.create_text(tx1 + 6, sy, text=label, fill=chip_fg, font=("Microsoft YaHei", 9), anchor="w")
-                c.create_text(tx2 - 10, sy, text="⚙", fill=th["muted"], font=("", 8))
+                c.create_text(tx2 - 10, sy, text=ui_gear_glyph(), fill=th["muted"], font=("", 8))
                 tip = f"{label}\n{detail}" if detail else label
                 self._tip_regions.append((tx1, ty1, tx2, ty2, tip))
                 self._hit_regions.append(("func", i, j, tx1, ty1, tx2, ty2))
@@ -2142,14 +2753,16 @@ class FissionMindmapPanel:
         self._place_win_below(win, ax, ay)
 
         en = BooleanVar(value=bool(cfg.get(enable_key)))
-        ttk.Checkbutton(win, text=f"启用「{label}」", variable=en).pack(anchor="w", padx=14, pady=(12, 6))
+        self._checkbutton(win, text=f"启用「{label}」", variable=en).pack(anchor="w", padx=14, pady=(12, 6))
         ttk.Separator(win).pack(fill=X, padx=12, pady=4)
 
         # 可滚动表单，避免长字段被裁
         wrap = ttk.Frame(win)
         wrap.pack(fill=BOTH, expand=True, padx=8, pady=4)
         canvas = tk.Canvas(wrap, highlightthickness=0)
-        vsb = ttk.Scrollbar(wrap, orient="vertical", command=canvas.yview)
+        from ui.workbench_skin import make_tk_vscrollbar
+
+        vsb = make_tk_vscrollbar(wrap, command=canvas.yview)
         form = ttk.Frame(canvas)
         form.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=form, anchor="nw")
@@ -2197,7 +2810,7 @@ class FissionMindmapPanel:
         def add_check(row: int, text: str, key: str):
             v = BooleanVar(value=bool(cfg.get(key)))
             bool_fields[key] = v
-            ttk.Checkbutton(form, text=text, variable=v).grid(
+            self._checkbutton(form, text=text, variable=v).grid(
                 row=row, column=0, columnspan=2, sticky="w", pady=4, padx=6,
             )
 
@@ -2214,12 +2827,6 @@ class FissionMindmapPanel:
                 form, text="「末尾N秒」时用末尾秒数；固定时段用开始/结束",
                 foreground="gray", font=("", 8), wraplength=420,
             ).grid(row=5, column=0, columnspan=2, sticky="w", padx=6)
-        elif enable_key == "enhance_enable":
-            add_combo(0, "模式", "enhance_mode", ["锐化降噪", "轻度放大"], "锐化降噪")
-            ttk.Label(
-                form, text="只能略改善观感，无法把糊片变真·高清",
-                foreground="gray", font=("", 8), wraplength=420,
-            ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6)
         elif enable_key == "ratio_enable":
             add_combo(0, "目标比例", "ratio_target", ratio_values, "9:16")
             add_entry(1, "模糊强度", "ratio_blur_strength", default="20")
@@ -2385,7 +2992,7 @@ class FissionMindmapPanel:
                     self._quick_add_from_template(tn)
 
                 tk.Button(
-                    tpl_host, text=f"  📋 {name}", anchor="w", bg=th["bg"], fg=th["text"],
+                    tpl_host, text=ui_list_item("📋", name), anchor="w", bg=th["bg"], fg=th["text"],
                     relief="flat", cursor="hand2", command=_add_tpl,
                 ).pack(fill=X, pady=1)
 
@@ -2428,9 +3035,9 @@ class FissionMindmapPanel:
             self.app._fission_add_from_template()
             self._after_plan_change(select_last=True)
 
-        tk.Button(new_host, text="  📄 从当前界面复制", anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_current).pack(fill=X, pady=1)
-        tk.Button(new_host, text="  📝 新建空白方案", anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_blank).pack(fill=X, pady=1)
-        tk.Button(new_host, text="  📂 更多模板…", anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_more).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("📄", "从当前界面复制"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_current).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("📝", "新建空白方案"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_blank).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("📂", "更多模板…"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_more).pack(fill=X, pady=1)
 
         pop.update_idletasks()
         pw, ph = pop.winfo_reqwidth(), pop.winfo_reqheight()
@@ -2548,14 +3155,14 @@ class FissionMindmapPanel:
         name_var = StringVar(value=f"方案{letter}")
         ttk.Label(win, text="方案名称（=输出文件夹）").pack(anchor="w", padx=12, pady=(12, 4))
         ttk.Entry(win, textvariable=name_var, width=36).pack(fill=X, padx=12)
-        ttk.Label(win, text="创建后点子功能⚙配置比例/路径等细节", foreground="gray").pack(anchor="w", padx=12, pady=8)
+        ttk.Label(win, text=f"创建后点子功能{ui_gear_hint()}配置比例/路径等细节", foreground="gray").pack(anchor="w", padx=12, pady=8)
 
         def ok():
             bn = sanitize_branch_name(name_var.get())
             if not bn:
                 return
             try:
-                cfg = dict(self.app._current_config_dict())
+                cfg = copy.deepcopy(self.app._current_config_dict())
             except Exception:
                 cfg = {}
             cfg["global_input"] = ""
@@ -2599,7 +3206,7 @@ class FissionMindmapPanel:
 
         name_var = StringVar(value=b.branch_name)
         en_var = BooleanVar(value=b.enabled)
-        ttk.Checkbutton(win, text="启用此方案", variable=en_var).pack(anchor="w", padx=14, pady=(12, 4))
+        self._checkbutton(win, text="启用此方案", variable=en_var).pack(anchor="w", padx=14, pady=(12, 4))
         ttk.Label(win, text="方案名称").pack(anchor="w", padx=14)
         ttk.Entry(win, textvariable=name_var, width=36).pack(fill=X, padx=14)
         ttk.Label(win, text=f"来源: {b.display_source()}", foreground="gray").pack(anchor="w", padx=14, pady=6)
@@ -2620,7 +3227,7 @@ class FissionMindmapPanel:
                 row.pack(fill=X, pady=2)
                 if key not in vars_map:
                     vars_map[key] = BooleanVar(value=bool(cfg.get(key)))
-                ttk.Checkbutton(row, text=label, variable=vars_map[key]).pack(side=LEFT)
+                self._checkbutton(row, text=label, variable=vars_map[key]).pack(side=LEFT)
                 ttk.Button(
                     row, text="设细节", width=6,
                     command=lambda i=fi, w=win: (w.destroy(), self._open_func_config(idx, i)),
@@ -2658,7 +3265,7 @@ class FissionMindmapPanel:
             if not messagebox.askyesno("确认", "用当前主页配置覆盖此方案快照？", parent=win):
                 return
             try:
-                new_cfg = dict(self.app._current_config_dict())
+                new_cfg = copy.deepcopy(self.app._current_config_dict())
             except Exception as exc:
                 messagebox.showerror("错误", str(exc), parent=win)
                 return
@@ -2732,7 +3339,63 @@ class FissionMindmapPanel:
         if self._view.get() == "mindmap":
             self.redraw()
 
+    def set_run_progress(
+        self,
+        *,
+        phase: str = "",
+        file_name: str = "",
+        file_idx: int = 0,
+        file_total: int = 0,
+        percent: float = -1.0,
+        label: str = "",
+    ) -> None:
+        """裂变执行期间：底部总进度 + 当前视频名。"""
+        rp = self._run_progress
+        if phase:
+            rp["phase"] = phase
+        if file_name:
+            rp["file"] = file_name
+        if file_idx > 0:
+            rp["file_idx"] = file_idx
+        if file_total > 0:
+            rp["file_total"] = file_total
+        if percent >= 0:
+            rp["pct"] = max(0.0, min(100.0, percent))
+        fi = int(rp.get("file_idx") or 0)
+        ft = int(rp.get("file_total") or 0)
+        fn = str(rp.get("file") or "").strip()
+        ph = str(rp.get("phase") or "").strip()
+        pct = float(rp.get("pct") or 0.0)
+        parts = []
+        if ph:
+            parts.append(ph)
+        if fn and ft > 0:
+            parts.append(f"视频 {fi}/{ft} · {fn}")
+        elif fn:
+            parts.append(fn)
+        if label:
+            parts.append(label)
+        msg = " · ".join(parts) if parts else "就绪"
+        try:
+            self._run_status_var.set(msg)
+            self._run_progress_bar["value"] = pct
+        except Exception:
+            pass
+        if self._view.get() == "mindmap":
+            self.redraw()
+
+    def clear_run_progress(self) -> None:
+        self._run_progress = {"phase": "", "file": "", "file_idx": 0, "file_total": 0, "pct": 0.0}
+        try:
+            self._run_status_var.set("就绪")
+            self._run_progress_bar["value"] = 0
+        except Exception:
+            pass
+        if self._view.get() == "mindmap":
+            self.redraw()
+
     def refresh(self) -> None:
+        self.refresh_template_catalog()
         self._sync_folders_from_app()
         self._rebuild_folder_list()
         if self._view.get() == "mindmap":

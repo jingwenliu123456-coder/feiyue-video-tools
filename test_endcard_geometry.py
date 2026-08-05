@@ -29,11 +29,13 @@ def test_filter_applies_transpose_and_fit():
         main_rotation=90,
         overlay_rotation=0,
         start_time=12.0,
+        logo_duration=3.0,
     )
     assert "transpose=1" in filt
     assert "setsar=1" in filt
     assert "tpad=" in filt
     assert "pad=1080:1920" in filt or "crop=1080:1920" in filt or "scale=1080:1920" in filt
+    assert "trim=duration=" in filt
     assert "setpts=PTS-STARTPTS+12.0/TB" in filt
     # 不应再走「同宽底对齐且不缩放」把竖屏落版塞进未旋转的横屏画布
     assert "H-h" not in filt or "transpose" in filt

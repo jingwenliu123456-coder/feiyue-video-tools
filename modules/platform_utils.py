@@ -13,6 +13,91 @@ from pathlib import Path
 SYSTEM = platform.system()  # 'Windows' | 'Darwin' | 'Linux'
 
 
+def is_mac() -> bool:
+    return SYSTEM == "Darwin"
+
+
+def use_ui_emoji() -> bool:
+    """macOS 彩色 Emoji 与桌面风格冲突；界面装饰符号仅 Windows 保留。"""
+    return not is_mac()
+
+
+def ui_decorative_icon(icon: str) -> str:
+    """卡片标题前缀：Mac 返回空，靠色条区分模块。"""
+    if not icon or is_mac():
+        return ""
+    return icon.strip()
+
+
+def ui_pause_label(*, paused: bool, compact: bool = False) -> str:
+    if is_mac():
+        return "继续" if paused else "暂停"
+    if compact:
+        return "▶" if paused else "⏸"
+    return "▶  继续" if paused else "⏸  暂停"
+
+
+def ui_start_batch_label() -> str:
+    if is_mac():
+        return "开始批处理（当前方案）"
+    return "▶  开始批处理（当前方案）"
+
+
+def ui_stop_label(*, compact: bool = False) -> str:
+    if is_mac():
+        return "停" if compact else "停止"
+    return "⏹" if compact else "⏹  停止"
+
+
+def ui_settings_label() -> str:
+    if is_mac():
+        return "设置"
+    return "⚙️  设置"
+
+
+def ui_collapse_chevron(*, expanded: bool) -> str:
+    if is_mac():
+        return "v" if expanded else ">"
+    return "▼" if expanded else "▶"
+
+
+def ui_queue_expand_hint() -> str:
+    if is_mac():
+        return "按顺序串行执行；失败自动重试。点 > 展开任务明细。"
+    return "按顺序串行执行；失败自动重试。点 ▶ 展开任务明细。"
+
+
+def ui_rules_expand_label() -> str:
+    return "展开文件名微调（规则方块 · 含旧版清理 · 默认收起）"
+
+
+def ui_hint_prefix() -> str:
+    return "" if is_mac() else "💡 "
+
+
+def ui_warning_prefix() -> str:
+    return "注意 " if is_mac() else "⚠ "
+
+
+def ui_ok_prefix() -> str:
+    return "" if is_mac() else "✅ "
+
+
+def ui_list_item(icon: str, text: str) -> str:
+    deco = ui_decorative_icon(icon)
+    if deco:
+        return f"  {deco} {text}"
+    return f"  {text}"
+
+
+def ui_gear_hint() -> str:
+    return "设置" if is_mac() else "⚙"
+
+
+def ui_gear_glyph() -> str:
+    return "···" if is_mac() else "⚙"
+
+
 def subprocess_flags():
     if SYSTEM == "Windows":
         return subprocess.CREATE_NO_WINDOW

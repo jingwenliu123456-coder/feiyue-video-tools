@@ -12,17 +12,20 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, X, Y, BooleanVar, Canvas, Frame, StringVar, TclError, filedialog, messagebox, ttk
 
 import video_batch_tool_v20 as v20
 from modules import asset_library as alib
-from modules.platform_utils import config_path, set_tk_window_icon
+from modules.platform_utils import config_path, is_mac, set_tk_window_icon, ui_pause_label, ui_queue_expand_hint, ui_settings_label, ui_start_batch_label, ui_stop_label, ui_warning_prefix, use_ui_emoji
 from modules import habi_memory
-from modules.ui_skin import UI_THEME_NONE, card_colors, make_button
+from modules.ui_skin import UI_THEME_NONE, card_colors, is_bootstrap_window, is_light_theme, make_button, make_checkbutton
+from ui.app_theme import APP_SKIN_LABELS, is_none_skin, theme_for_label
 from ui.workbench_skin import (
     FEATURE_ACCENT,
     WB_BG,
@@ -30,13 +33,27 @@ from ui.workbench_skin import (
     WB_CARD,
     WB_MUTED,
     WB_TEXT,
+    apply_workbench_palette,
     apply_workbench_root,
+    apply_workbench_ttk_deep,
+    apply_workbench_ttk_tree,
+    apply_theme_palette,
+    apply_theme_to_window,
     feature_row,
     float_card,
     make_scroll,
+    make_tk_vscrollbar,
     pipeline_bar,
+    recolor_tk_widget_tree,
+    refresh_workbench_ttk_styles,
+    refresh_workbench_surfaces,
+    register_themed_window,
+    sync_entire_ui_colors,
+    apply_safe_ttk_base,
     sheet_notebook,
+    workbench_palette,
 )
+from ui.three_column_layout import ThreeColumnLayout, collapsible_section
 from video_batch_tool_v21 import VideoBatchToolV21
 from video_batch_tool_v23 import VideoBatchToolV23 as _V23
 
@@ -44,14 +61,13 @@ APP_TITLE = "飞跃视频批处理工具"
 
 _FEATURE_SPECS: list[tuple[str, str, str]] = [
     ("cut", "视频裁切", "build_cut_section"),
-    ("enhance", "画质增强", "build_enhance_section"),
     ("ratio", "比例适配", "build_ratio_section"),
     ("mov_wm", "动态水印", "build_mov_wm_section"),
     ("png_wm", "静态水印", "build_audio_replace_section"),
     ("layer", "浮层落版", "build_layer_section"),
     ("ending", "拼接落版", "build_ending_section"),
     ("overlay", "可视化叠加", "build_overlay_grid_section"),
-    ("subtitle", "字幕识别/翻译/烧录", "build_subtitle_section"),
+    ("subtitle", "字幕（识别/烧录）", "build_subtitle_section"),
 ]
 
 _FEATURE_PATH_REQ: dict[str, tuple[str, str]] = {
@@ -90,7 +106,11 @@ class VideoBatchToolV24(_V23):
         self._footer_features_var = StringVar(value="已启用 0 项")
         self._asset_mode_var = StringVar(value="copy")
         self._paned: ttk.Panedwindow | None = None
+        self._layout: ThreeColumnLayout | None = None
         self._tree_wrap: ttk.Frame | None = None
+        self._left_scroll_canvas: tk.Canvas | None = None
+        self._left_body_host: tk.Frame | None = None
+        self._feature_list_host: tk.Frame | None = None
         self._fission_host: ttk.Frame | None = None
         self._fission_panel = None
         self._preview_host: ttk.Frame | None = None
@@ -109,7 +129,14 @@ class VideoBatchToolV24(_V23):
         self._watch_monitor_running: bool = False
         self._watch_seen_dirs: set[str] = set()
         self._watch_poll_job: Any = None
+        self._pause_btn: tk.Button | None = None
+        self._stop_btn: tk.Button | None = None
+        # 须在 super().__init__ 之前：父类 build_ui / 换肤会触发 _refresh_run_control_buttons
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._is_paused = False
         super().__init__(root)
+        self._wrap_batch_ctl_ui()
         self._load_user_pipeline_order()
         try:
             self._refresh_pipeline_bar()
@@ -118,15 +145,348 @@ class VideoBatchToolV24(_V23):
         try:
             self.root.title(APP_TITLE)
             if hasattr(self, "main_title_label"):
-                self.main_title_label.config(text=f"🎬  {APP_TITLE}")
+                self.main_title_label.config(
+                    text=f"🎬  {APP_TITLE}" if use_ui_emoji() else APP_TITLE,
+                )
         except Exception:
             pass
         self._bind_workspace_traces()
         self._bind_feature_traces()
-        self._refresh_input_tree()
-        self._refresh_output_preview()
-        self._refresh_asset_tree()
+        self.root.after_idle(self._deferred_startup_refresh)
         self.root.after_idle(self._after_config_loaded)
+
+    def _deferred_startup_refresh(self) -> None:
+        """延后刷新，避免启动时与 build_ui / 主题叠加卡顿。"""
+        try:
+            self._refresh_input_tree()
+            self._refresh_output_preview()
+            self._refresh_asset_tree()
+        except Exception:
+            pass
+
+    def _apply_app_skin(self, skin_label: str, *, from_fission: bool = False) -> None:
+        """全应用统一皮肤：批处理 / 规范命名 / 批量裂变同一套配色。"""
+        label = (skin_label or "简约工作台").strip()
+        if label not in APP_SKIN_LABELS:
+            label = "简约工作台"
+
+        th = theme_for_label(label)
+        none_mode = is_none_skin(label)
+
+        old_pal = apply_theme_palette(th)
+        new_pal = workbench_palette()
+        from modules.ui_skin import is_dark_color
+
+        dark = is_dark_color(str(th.get("bg", "")))
+
+        # 不再切换 ttkbootstrap 暗色主题（易半套失控）；统一走 clam + 自绘色板
+        apply_safe_ttk_base(self.root)
+
+        def _delayed_recolor() -> None:
+            try:
+                recolor_tk_widget_tree(self.root, old_pal, new_pal)
+                sync_entire_ui_colors(self.root, app=self)
+                if self._layout is not None:
+                    self._layout.apply_theme(new_pal)
+                style = ttk.Style()
+                style.configure("TFrame", background=new_pal.get("bg"))
+                style.configure("TLabelframe", background=new_pal.get("bg"))
+                style.configure(
+                    "TLabelframe.Label",
+                    background=new_pal.get("bg"),
+                    foreground=new_pal.get("text"),
+                )
+                style.configure("TNotebook", background=new_pal.get("bg"))
+                style.configure("TNotebook.Tab", background=new_pal.get("border"), foreground=new_pal.get("text"))
+                style.map(
+                    "TNotebook.Tab",
+                    background=[
+                        ("selected", new_pal.get("card")),
+                        ("active", new_pal.get("border")),
+                    ],
+                    foreground=[
+                        ("selected", new_pal.get("text")),
+                        ("active", new_pal.get("text")),
+                    ],
+                )
+                style.configure(
+                    "Treeview",
+                    background=new_pal.get("card"),
+                    foreground=new_pal.get("text"),
+                    fieldbackground=new_pal.get("card"),
+                )
+                style.configure(
+                    "Treeview.Heading",
+                    background=new_pal.get("border"),
+                    foreground=new_pal.get("text"),
+                )
+                self._fix_white_blocks(self.root, new_pal)
+                if getattr(self, "_left_scroll_canvas", None) is not None:
+                    try:
+                        self._left_scroll_canvas.configure(bg=new_pal.get("bg", WB_BG))
+                    except tk.TclError:
+                        pass
+                naming = getattr(self, "_naming_app", None)
+                if naming is not None:
+                    blocks = getattr(naming, "_rename_blocks", None)
+                    if blocks is not None and hasattr(blocks, "apply_theme"):
+                        blocks.apply_theme(new_pal)
+            except Exception as exc:
+                print(f"主题刷新异常: {exc}")
+
+        self.root.after_idle(_delayed_recolor)
+
+        self.root._ui_theme = UI_THEME_NONE if none_mode else label  # noqa: SLF001
+        self._card_colors = card_colors(dark=dark)
+        try:
+            self._refresh_pipeline_bar()
+        except Exception:
+            pass
+        panel = getattr(self, "_fission_panel", None)
+        if panel is not None:
+            try:
+                if not from_fission or panel._theme_key.get() != label:
+                    panel._theme_key.set(label)
+                panel.th = dict(th)
+                panel._apply_theme()
+            except Exception:
+                pass
+        try:
+            self._refresh_log_theme()
+            self._refresh_run_control_buttons()
+        except Exception:
+            pass
+
+    def _wrap_batch_ctl_ui(self) -> None:
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is None:
+            return
+
+        def _wrap(fn):
+            def wrapped(*args, **kwargs):
+                result = fn(*args, **kwargs)
+                try:
+                    self._sync_pause_event_from_ctl()
+                    self.root.after(0, self._refresh_run_control_buttons)
+                except Exception:
+                    pass
+                return result
+
+            return wrapped
+
+        ctl.begin = _wrap(ctl.begin)
+        ctl.end = _wrap(ctl.end)
+        ctl.toggle_pause = _wrap(ctl.toggle_pause)
+        ctl.request_stop = _wrap(ctl.request_stop)
+
+    def _sync_pause_event_from_ctl(self) -> None:
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is None or not ctl.active:
+            return
+        if ctl.is_paused:
+            self._pause_event.clear()
+            self._is_paused = True
+        else:
+            self._pause_event.set()
+            self._is_paused = False
+
+    def _toggle_pause(self) -> None:
+        """暂停/继续：有任务运行中才可点。"""
+        running = (
+            getattr(self, "_processing", False)
+            or getattr(self, "_fission_running", False)
+            or getattr(self, "_job_queue_running", False)
+        )
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl and ctl.active:
+            ctl.toggle_pause()
+            self._sync_pause_event_from_ctl()
+            self._refresh_run_control_buttons()
+            return
+        if not running:
+            try:
+                self.status_var.set("当前没有运行中的任务")
+            except Exception:
+                pass
+            return
+        if self._is_paused:
+            self._pause_event.set()
+            self._is_paused = False
+            try:
+                self.status_var.set("继续处理...")
+                self.log("已继续")
+            except Exception:
+                pass
+        else:
+            self._pause_event.clear()
+            self._is_paused = True
+            try:
+                self.status_var.set("已暂停（点击继续）")
+                self.log("已暂停")
+            except Exception:
+                pass
+        self._refresh_run_control_buttons()
+
+    def _check_pause(self, timeout: float = 0.5) -> None:
+        """worker 线程中调用。"""
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl and ctl.active:
+            if ctl.wait_if_paused():
+                return
+        if not hasattr(self, "_pause_event"):
+            return
+        while not self._pause_event.wait(timeout=timeout):
+            if ctl and ctl.should_stop:
+                return
+            if not (
+                getattr(self, "_processing", False)
+                or getattr(self, "_fission_running", False)
+                or getattr(self, "_job_queue_running", False)
+            ):
+                return
+
+    def _fix_white_blocks(self, widget: tk.Misc, palette: dict) -> None:
+        """强力补刷硬编码白色/浅灰背景。"""
+        bg_color = palette.get("bg", WB_BG)
+        card_color = palette.get("card", WB_CARD)
+        fg_color = palette.get("text", palette.get("fg", WB_TEXT))
+        white_like = {
+            "#ffffff", "#fff", "#f5f5f5", "#fafafa", "#eeeeee",
+            "#e0e0e0", "#d9d9d9", "#f0f0f0",
+        }
+        try:
+            wtype = widget.winfo_class()
+            if wtype in ("Frame", "Toplevel", "LabelFrame"):
+                c = str(widget.cget("bg") or "").lower()
+                if c in white_like:
+                    widget.configure(bg=card_color if wtype != "Toplevel" else bg_color)
+            elif wtype == "Label":
+                c = str(widget.cget("bg") or "").lower()
+                if c in white_like:
+                    widget.configure(bg=card_color, fg=fg_color)
+            elif wtype == "Button":
+                c = str(widget.cget("bg") or "").lower()
+                if c in white_like:
+                    widget.configure(bg=card_color, fg=fg_color)
+            elif wtype == "Canvas":
+                c = str(widget.cget("bg") or "").lower()
+                if c in white_like:
+                    widget.configure(bg=bg_color)
+            elif wtype == "Text":
+                c = str(widget.cget("bg") or "").lower()
+                if c in white_like:
+                    widget.configure(bg=card_color, fg=fg_color, insertbackground=fg_color)
+        except (tk.TclError, AttributeError):
+            pass
+        try:
+            for child in widget.winfo_children():
+                self._fix_white_blocks(child, palette)
+        except tk.TclError:
+            pass
+
+    def _ui_batch_pause(self) -> None:
+        self._toggle_pause()
+
+    def _ui_batch_stop(self) -> None:
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is None or not ctl.active:
+            return
+        ctl.request_stop()
+
+    def _refresh_run_control_buttons(self) -> None:
+        ctl = getattr(self, "_batch_ctl", None)
+        running = (
+            bool(ctl and ctl.active)
+            or getattr(self, "_processing", False)
+            or getattr(self, "_fission_running", False)
+            or getattr(self, "_job_queue_running", False)
+        )
+        paused = bool(ctl and ctl.is_paused) if (ctl and ctl.active) else bool(getattr(self, "_is_paused", False))
+        for btn in (
+            getattr(self, "_pause_btn", None),
+            getattr(self, "_stop_btn", None),
+            getattr(self, "_queue_pause_btn", None),
+            getattr(self, "_queue_stop_btn", None),
+            getattr(self, "_fission_pause_btn", None),
+            getattr(self, "_fission_stop_btn", None),
+        ):
+            if btn is None:
+                continue
+            try:
+                if btn in (getattr(self, "_stop_btn", None), getattr(self, "_queue_stop_btn", None), getattr(self, "_fission_stop_btn", None)):
+                    btn.configure(state=tk.NORMAL if running else tk.DISABLED)
+                else:
+                    btn.configure(state=tk.NORMAL if running else tk.DISABLED)
+            except TclError:
+                pass
+        pause = getattr(self, "_pause_btn", None)
+        if pause is not None:
+            try:
+                if paused:
+                    pause.configure(text=ui_pause_label(paused=True), bg="#2e7d32")
+                else:
+                    pause.configure(text=ui_pause_label(paused=False), bg="#f5a623")
+            except TclError:
+                pass
+        for pbtn, compact in (
+            (getattr(self, "_queue_pause_btn", None), True),
+            (getattr(self, "_fission_pause_btn", None), False),
+        ):
+            if pbtn is None:
+                continue
+            try:
+                if compact:
+                    pbtn.configure(text=ui_pause_label(paused=paused, compact=True))
+                else:
+                    pbtn.configure(text=ui_pause_label(paused=paused))
+            except TclError:
+                pass
+
+    def _refresh_log_theme(self) -> None:
+        log = getattr(self, "log_text", None)
+        if log is None:
+            return
+        try:
+            from modules.ui_skin import is_dark_color
+
+            label = str(getattr(self.root, "_ui_theme", "") or "简约工作台")
+            th = theme_for_label(label)
+            dark = is_dark_color(str(th.get("bg", "")))
+            bg = str(th.get("card", WB_CARD))
+            fg = str(th.get("text", WB_TEXT))
+            if not dark:
+                bg, fg = "#1E1E2E", "#E5E7EB"
+            log.configure(bg=bg, fg=fg, insertbackground=fg)
+            wrap = log.master
+            if isinstance(wrap, tk.Frame):
+                wrap.configure(bg=bg)
+        except TclError:
+            pass
+
+    def _on_batch_space_key(self, event):
+        result = super()._on_batch_space_key(event)
+        self._refresh_run_control_buttons()
+        return result
+
+    def _on_batch_escape_key(self, event):
+        result = super()._on_batch_escape_key(event)
+        self._refresh_run_control_buttons()
+        return result
+
+    def _apply_ui_theme(self, theme_key: str) -> None:
+        """兼容旧调用：映射到统一皮肤。"""
+        legacy = {
+            "flatly": "简约工作台",
+            "darkly": "黑紫赛博",
+            "litera": "经典蓝白",
+            "minty": "绿黄养眼",
+            "sandstone": "奶油可爱",
+            "none": "无主题（经典皮肤）",
+        }
+        label = legacy.get(str(theme_key or "").strip(), "简约工作台")
+        if theme_key == UI_THEME_NONE:
+            label = "无主题（经典皮肤）"
+        self._apply_app_skin(label)
 
     def _scroll_to_preview_module(self) -> None:
         return
@@ -179,11 +539,60 @@ class VideoBatchToolV24(_V23):
         self._log_outer = ttk.Frame(self.main_frame)
         self._fission_panel = None
 
+    def setup_style(self):
+        """V24：统一 clam + 工作台色板；锁死滚动条和 PanedWindow 为中性灰。"""
+        from modules.ui_skin import FONTS, PAD, card_colors
+
+        self.ui_font = FONTS["caption"]
+        self._pad = PAD
+        self._use_bootstrap = False
+        self._card_colors = card_colors(dark=False)
+        self._theme_colors = {}
+
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except TclError:
+            pass
+        apply_safe_ttk_base(self.root)
+
+        from ui.workbench_skin import SCROLLBAR_WIDTH, SCROLL_THUMB, SCROLL_THUMB_ACTIVE, SCROLL_TROUGH
+
+        scrollbar_names = (
+            "Vertical.TScrollbar",
+            "Horizontal.TScrollbar",
+            "Workbench.Vertical.TScrollbar",
+            "Workbench.Horizontal.TScrollbar",
+        )
+        try:
+            for name in scrollbar_names:
+                style.configure(
+                    name,
+                    background=SCROLL_THUMB,
+                    troughcolor=SCROLL_TROUGH,
+                    bordercolor=SCROLL_TROUGH,
+                    arrowcolor="#888888",
+                    gripcount=0,
+                    width=SCROLLBAR_WIDTH,
+                )
+                style.map(
+                    name,
+                    background=[("active", SCROLL_THUMB_ACTIVE), ("pressed", "#909090")],
+                )
+            style.configure("TPanedwindow", background="#f5f5f5", sashthickness=4, sashpad=0)
+            style.configure("Workbench.TPanedwindow", background="#f5f5f5", sashthickness=4, sashpad=0)
+        except TclError:
+            pass
+
     def _init_chrome(self):
         from modules.ui_skin import DEFAULT_MODULE_COLORS
 
         apply_workbench_root(self.root)
-        self.root.minsize(1100, 700)
+        self.root.minsize(1280, 760)
+        try:
+            self.root.geometry("1450x850")
+        except TclError:
+            pass
         try:
             set_tk_window_icon(self.root, "video")
         except Exception:
@@ -195,11 +604,15 @@ class VideoBatchToolV24(_V23):
 
         hdr = Frame(self.root, bg=WB_CARD, highlightthickness=1, highlightbackground=WB_BORDER)
         hdr.pack(fill=X, side=TOP)
+        self._wb_hdr = hdr
 
         left_hdr = Frame(hdr, bg=WB_CARD)
         left_hdr.pack(side=LEFT, padx=20, pady=14)
         self.main_title_label = tk.Label(
-            left_hdr, text=f"🎬  {APP_TITLE}", bg=WB_CARD, fg=WB_TEXT,
+            left_hdr,
+            text=f"🎬  {APP_TITLE}" if use_ui_emoji() else APP_TITLE,
+            bg=WB_CARD,
+            fg=WB_TEXT,
             font=("Microsoft YaHei", 14, "bold"),
         )
         self.main_title_label.pack(side=LEFT)
@@ -213,6 +626,7 @@ class VideoBatchToolV24(_V23):
 
         status_wrap = Frame(self.root, bg=WB_CARD, highlightthickness=1, highlightbackground=WB_BORDER)
         status_wrap.pack(fill=X, side=BOTTOM)
+        self._wb_status_wrap = status_wrap
         inner_status = Frame(status_wrap, bg=WB_CARD)
         inner_status.pack(fill=X, padx=16, pady=8)
         tk.Label(
@@ -230,7 +644,7 @@ class VideoBatchToolV24(_V23):
         ).pack(side=LEFT, fill=X, expand=True)
         self.progress = ttk.Progressbar(inner_status, orient="horizontal", mode="determinate", length=180)
         self.progress.pack(side=RIGHT, padx=(8, 0))
-        make_button(inner_status, "⚙️ 设置", self.open_preferences, kind="outline", width=8).pack(
+        make_button(inner_status, ui_settings_label(), self.open_preferences, kind="outline", width=8).pack(
             side=RIGHT, padx=(8, 0),
         )
         # 界面主题改到右下角「设置」里，不再用左上角菜单栏
@@ -278,11 +692,102 @@ class VideoBatchToolV24(_V23):
             return self._is_enabled("subtitle_enable")
         return super()._batch_step_enabled(key)
 
-    @staticmethod
-    def _batch_step_label(key: str) -> str:  # type: ignore[override]
+    def _subtitle_step_label(self) -> str:
+        mode = (
+            getattr(self, "subtitle_work_mode", None).get()
+            if getattr(self, "subtitle_work_mode", None) is not None
+            else ""
+        )
+        if "外部" in (mode or ""):
+            return "外部 SRT 烧录"
+        return "字幕 → SRT"
+
+    def _batch_step_label(self, key: str) -> str:  # type: ignore[override]
         if key == "subtitle":
-            return "字幕识别/翻译/烧录"
+            return self._subtitle_step_label()
         return VideoBatchToolV21._batch_step_label(key)
+
+    def _run_subtitle_burn_step(
+        self,
+        current: str,
+        out: str,
+        temps: list[str],
+    ) -> str:
+        """外部 SRT（剪映/PR 导出）→ FFmpeg 硬字幕烧录，纯本地、不联网。"""
+        import shutil
+        from modules.output_naming import unique_path
+        from modules.subtitle_engine import (
+            SubtitleEngine,
+            resolve_external_srt,
+            suggest_subtitle_font,
+            validate_subtitle_font,
+        )
+
+        srt_source = (
+            getattr(self, "subtitle_srt_source", None).get()
+            if getattr(self, "subtitle_srt_source", None) is not None
+            else "与视频同目录（同名 .srt）"
+        )
+
+        if (srt_source or "").startswith("固定"):
+            fixed_srt = (
+                getattr(self, "subtitle_fixed_srt", None).get().strip()
+                if getattr(self, "subtitle_fixed_srt", None) is not None
+                else ""
+            )
+            if not fixed_srt or not os.path.isfile(fixed_srt):
+                raise RuntimeError("请先选择有效的固定 SRT 文件（将应用到本批所有视频）")
+            srt_path = fixed_srt
+        else:
+            srt_dir: str | None = None
+            if (srt_source or "").startswith("指定"):
+                srt_dir = (
+                    getattr(self, "subtitle_srt_folder", None).get().strip()
+                    if getattr(self, "subtitle_srt_folder", None) is not None
+                    else ""
+                )
+                if not srt_dir or not os.path.isdir(srt_dir):
+                    raise RuntimeError("请先选择有效的字幕文件夹（与视频文件名相同的 .srt）")
+
+            srt_path = resolve_external_srt(current, srt_dir=srt_dir)
+            if not srt_path:
+                stem = Path(current).stem
+                where = srt_dir or os.path.dirname(current)
+                raise RuntimeError(f"未找到匹配字幕：{where}{os.sep}{stem}.srt")
+
+        font_name = (
+            getattr(self, "subtitle_font_name", None).get().strip()
+            if getattr(self, "subtitle_font_name", None) is not None
+            else ""
+        ) or suggest_subtitle_font()
+        ok_font, font_msg = validate_subtitle_font(font_name, self.root)
+        if not ok_font:
+            self.log(f"  ⚠ 烧录字体: {font_msg}（仍尝试使用 {font_name}）")
+
+        engine = SubtitleEngine(
+            ffmpeg_path=v20.FFMPEG_PATH,
+            font_name=font_name,
+        )
+        tmp_video = self.get_temp(out, "subtitle_burn", ext="mp4")
+        temps.append(tmp_video)
+
+        self.log("  工作模式: 外部 SRT → 烧录（纯本地 FFmpeg）")
+        if (srt_source or "").startswith("固定"):
+            self.log(f"  固定字幕（应用到所有视频）: {Path(srt_path).name}")
+        self.log(f"  字幕文件: {srt_path}")
+        engine.burn_subtitles(current, srt_path, tmp_video)
+        self.log(f"  烧录字体: {font_name}")
+
+        out_dir = os.path.dirname(out)
+        out_srt = unique_path(out_dir, f"{Path(out).stem}.srt")
+        try:
+            if os.path.exists(out_srt):
+                os.remove(out_srt)
+        except OSError:
+            pass
+        shutil.copy2(srt_path, out_srt)
+        self.log(f"  字幕副本: {out_srt}")
+        return tmp_video
 
     def _run_batch_step(  # type: ignore[override]
         self,
@@ -297,11 +802,20 @@ class VideoBatchToolV24(_V23):
         if key != "subtitle":
             return super()._run_batch_step(key, current, inp, out, temps, idx, total)
 
+        work_mode = (
+            getattr(self, "subtitle_work_mode", None).get()
+            if getattr(self, "subtitle_work_mode", None) is not None
+            else "AI 识别/翻译 → SRT"
+        )
+        self._set_batch_step_status(idx, total, self._subtitle_step_label())
+        self._check_pause(timeout=0.2)
+
+        if "外部" in (work_mode or ""):
+            return self._run_subtitle_burn_step(current, out, temps)
+
         import shutil
         from modules.output_naming import unique_path
-        from modules.subtitle_engine import SubtitleEngine
-
-        self._set_batch_step_status(idx, total, self._batch_step_label(key))
+        from modules.subtitle_engine import SubtitleEngine, probe_video_duration_sec
 
         def _parse_ui_lang(ui: str) -> str | None:
             ui = (ui or "").strip()
@@ -317,6 +831,11 @@ class VideoBatchToolV24(_V23):
 
         src_ui = getattr(self, "subtitle_src_lang", None).get() if getattr(self, "subtitle_src_lang", None) is not None else "自动检测(auto)"
         tgt_ui = getattr(self, "subtitle_tgt_lang", None).get() if getattr(self, "subtitle_tgt_lang", None) is not None else "不翻译(none)"
+        mode_ui = (
+            getattr(self, "subtitle_output_mode", None).get()
+            if getattr(self, "subtitle_output_mode", None) is not None
+            else "仅翻译"
+        )
 
         src_code = _parse_ui_lang(src_ui)
         tgt_code = _parse_ui_lang(tgt_ui)
@@ -330,60 +849,139 @@ class VideoBatchToolV24(_V23):
             else:
                 target_google = tgt_code
 
+        output_mode = (mode_ui or "仅翻译").strip()
+        if output_mode in ("仅翻译", "双语并存(单文件)", "双文件输出") and not target_google:
+            self.log("  ⚠ 当前输出模式需要目标语言，已改为「仅原语言」")
+            output_mode = "仅原语言"
+
         model_size = (
             getattr(self, "subtitle_model_size", None).get()
             if getattr(self, "subtitle_model_size", None) is not None
             else "small"
         )
-        font_name = (
-            getattr(self, "subtitle_font_name", None).get()
-            if getattr(self, "subtitle_font_name", None) is not None
-            else "Arial Unicode MS"
-        )
-        burn_in = bool(
-            getattr(self, "subtitle_burn_in", None).get()
-            if getattr(self, "subtitle_burn_in", None) is not None
-            else True
-        )
 
         tmp_srt = self.get_temp(out, "subtitle", ext="srt")
         temps.append(tmp_srt)
 
+        out_dir = os.path.dirname(out)
+        stem = Path(out).stem
         out_srt_name = Path(out).with_suffix(".srt").name
-        out_srt_path = unique_path(os.path.dirname(out), out_srt_name)
-
-        tmp_video: str | None = None
-        if burn_in:
-            tmp_video = self.get_temp(out, "subtitle_burn", ext="mp4")
-            temps.append(tmp_video)
+        out_srt_path = unique_path(out_dir, out_srt_name)
 
         engine = SubtitleEngine(
             ffmpeg_path=v20.FFMPEG_PATH,
             whisper_model_size=model_size,
             device="cpu",
             compute_type="int8",
-            font_name=font_name,
         )
 
-        engine.process_video_to_srt(
+        src_segments, detected, backend = engine.transcribe_video(
             current,
-            tmp_srt,
             source_lang=source_lang_whisper,
-            target_lang=target_google,
         )
+        if source_lang_whisper:
+            src_google = engine._GOOGLE_LANG_MAP.get(source_lang_whisper, source_lang_whisper)
+        elif detected:
+            src_google = engine._GOOGLE_LANG_MAP.get(detected, detected)
+        else:
+            src_google = None
 
-        if burn_in and tmp_video:
-            engine.burn_subtitles(current, tmp_srt, tmp_video)
+        translated_segments: list[dict] | None = None
+        trans_stats: dict[str, int] = {}
+        if target_google and output_mode != "仅原语言":
+            translated_segments = engine.translate_segments(
+                src_segments,
+                source_lang=src_google,
+                target_lang=target_google,
+                stats=trans_stats,
+            )
+            changed = trans_stats.get("changed", 0)
+            total = trans_stats.get("total", len(src_segments))
+            self.log(
+                f"  翻译: {changed}/{total} 条已变化"
+                f"（源≈{src_google or 'auto'} → {target_google}）"
+            )
+            if changed == 0 and total > 0 and output_mode in ("双语并存(单文件)", "仅翻译"):
+                self.log("  ⚠ 翻译结果与原文相同，请确认目标语言、网络，或源语言是否识别正确")
 
-        try:
-            if os.path.exists(out_srt_path):
-                os.remove(out_srt_path)
-        except Exception:
-            pass
-        shutil.move(tmp_srt, str(out_srt_path))
+        if output_mode == "仅原语言":
+            engine.write_srt(src_segments, tmp_srt)
+            self.log(f"  输出模式: 仅原语言")
 
-        # burn_in=True 时返回中间视频给后续 safe_publish_media；否则保持 current 不变
-        return tmp_video if burn_in else current
+        elif output_mode == "仅翻译":
+            segs = translated_segments if translated_segments is not None else src_segments
+            engine.write_srt(segs, tmp_srt)
+            self.log(f"  输出模式: 仅翻译")
+
+        elif output_mode == "双语并存(单文件)":
+            tgt_segs = translated_segments if translated_segments is not None else src_segments
+            force_dual = bool(target_google)
+            dual = engine.merge_bilingual(src_segments, tgt_segs, force_dual=force_dual)
+            engine.write_srt(dual, tmp_srt)
+            self.log(f"  输出模式: 双语并存（单 SRT，每段两行）")
+
+        elif output_mode == "双文件输出":
+            tmp_src = self.get_temp(out, "subtitle_src", ext="srt")
+            tmp_tgt = self.get_temp(out, "subtitle_tgt", ext="srt")
+            temps.extend([tmp_src, tmp_tgt])
+            engine.write_srt(src_segments, tmp_src)
+            tgt_segs = translated_segments if translated_segments is not None else src_segments
+            engine.write_srt(tgt_segs, tmp_tgt)
+
+            src_tag = (detected or src_code or "source").replace("/", "-")
+            tgt_tag = (tgt_code or "trans").replace("/", "-")
+            out_src = unique_path(out_dir, f"{stem}_{src_tag}.srt")
+            out_tgt = unique_path(out_dir, f"{stem}_{tgt_tag}.srt")
+            for p in (out_src, out_tgt):
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            shutil.move(tmp_src, str(out_src))
+            shutil.move(tmp_tgt, str(out_tgt))
+            try:
+                if os.path.exists(tmp_srt):
+                    os.remove(tmp_srt)
+            except Exception:
+                pass
+            self.log("  输出模式: 双文件")
+            self.log(f"  原语言 SRT: {out_src}")
+            self.log(f"  翻译 SRT: {out_tgt}")
+        else:
+            engine.write_srt(translated_segments or src_segments, tmp_srt)
+            self.log(f"  输出模式: {output_mode}")
+
+        duration_sec = probe_video_duration_sec(current, ffprobe_path=v20.FFPROBE_PATH)
+        seg_n = len(src_segments)
+        self.log(f"  字幕引擎: {backend} | 语言≈{detected or 'auto'} | {seg_n} 条字幕（本视频独立识别）")
+        if output_mode != "双文件输出":
+            self.log(f"  SRT 输出: {out_srt_path}")
+        if backend == "google":
+            self.log(
+                "  ⚠ Google 备用识别：长视频时间轴可能不准。"
+                "请运行 scripts\\setup_subtitle_env.bat 后重启工具"
+            )
+            if duration_sec > 90 and seg_n <= 1:
+                self.log(
+                    f"  ⚠ 视频约 {int(duration_sec)}s 但仅 {seg_n} 条字幕，"
+                    "此 SRT 不适合直接使用，请修复 Whisper 后重跑"
+                )
+        elif seg_n == 0:
+            self.log("  ⚠ 未识别到有效字幕内容（请确认视频有人声；纯 BGM 素材无法识别）")
+            raise RuntimeError(
+                "字幕识别结果为空：请检查视频是否有人声，或 Whisper 是否可用（见启动日志）"
+            )
+
+        if output_mode != "双文件输出":
+            try:
+                if os.path.exists(out_srt_path):
+                    os.remove(out_srt_path)
+            except Exception:
+                pass
+            shutil.move(tmp_srt, str(out_srt_path))
+
+        return current
 
     def _load_user_pipeline_order(self) -> None:
         try:
@@ -462,6 +1060,8 @@ class VideoBatchToolV24(_V23):
         make_button(bf, "恢复出厂顺序", reset, kind="outline").pack(side=LEFT, padx=8)
         make_button(bf, "取消", win.destroy, kind="outline").pack(side=RIGHT, padx=4)
         make_button(bf, "保存", save, kind="success").pack(side=RIGHT)
+        apply_theme_to_window(win, app=self)
+        register_themed_window(self, win)
 
     def _missing_feature_paths(self) -> list[tuple[str, str]]:
         """返回 [(功能中文名, 原因)]；路径空或文件不存在都会列出。"""
@@ -573,7 +1173,7 @@ class VideoBatchToolV24(_V23):
     def _autoload_quick_start(self, pref: dict) -> None:
         """快速启动：批处理 / 裂变可分别自动加载方案。"""
         batch_name = habi_memory.resolve_autoload_scheme(pref, key="batch_autoload")
-        fission_name = habi_memory.resolve_autoload_scheme(pref, key="fission_autoload")
+        fission_res = habi_memory.resolve_fission_autoload(pref)
 
         # 批处理：静默套模板（勾选 + 路径）
         if batch_name:
@@ -588,18 +1188,50 @@ class VideoBatchToolV24(_V23):
         except Exception:
             pass
 
-        # 裂变：画布挂上方案（若与批处理同一模板且已加载，只挂画布）
-        mount = fission_name or ""
-        if mount:
-            panel = getattr(self, "_fission_panel", None)
-            if panel is not None:
+        panel = getattr(self, "_fission_panel", None)
+        if fission_res.get("kind") == "plan":
+            plan_name = (fission_res.get("name") or "").strip()
+            if plan_name:
+                self._load_fission_plan_quiet(plan_name)
+        elif fission_res.get("kind") == "template":
+            mount = (fission_res.get("name") or "").strip()
+            if mount:
+                if panel is not None:
+                    try:
+                        panel.ensure_scheme_from_template(mount)
+                    except Exception as exc:
+                        self.log(f"裂变页自动挂载方案失败: {exc}")
+                if not batch_name:
+                    self._load_template_quiet(mount, io_mode="template")
+
+    def _load_fission_plan_quiet(self, plan_stem: str) -> bool:
+        """静默加载 fission_plans 下的组合 JSON。"""
+        from modules.fission_engine import load_fission_plan
+
+        stem = (plan_stem or "").strip()
+        if not stem:
+            return False
+        path = self._fission_plans_dir() / f"{stem}.json"
+        if not path.is_file():
+            self.log(f"裂变组合不存在: {path}")
+            return False
+        try:
+            plan = load_fission_plan(path)
+            self._fission_plan = plan
+            if hasattr(self, "fission_plan_name_var"):
                 try:
-                    panel.ensure_scheme_from_template(mount)
-                except Exception as exc:
-                    self.log(f"裂变页自动挂载方案失败: {exc}")
-            # 若只开了裂变自动加载、没开批处理，也给批处理页套上同一套，方便对照
-            if not batch_name:
-                self._load_template_quiet(mount, io_mode="template")
+                    self.fission_plan_name_var.set(plan.name)
+                except Exception:
+                    pass
+            panel = getattr(self, "_fission_panel", None)
+            if panel is not None and hasattr(panel, "on_plan_loaded"):
+                panel.on_plan_loaded()
+            habi_memory.remember_fission_plan(stem)
+            self.log(f"已自动加载裂变组合: {plan.name}")
+            return True
+        except Exception as exc:
+            self.log(f"自动加载裂变组合失败: {exc}")
+            return False
 
     def _on_root_configure(self, event=None) -> None:
         if event is not None and event.widget is not self.root:
@@ -701,6 +1333,36 @@ class VideoBatchToolV24(_V23):
         if not getattr(self, "_memory_applied", False):
             self._memory_applied = True
             self.root.after(120, self._apply_global_memory)
+        self.root.after(200, self._log_subtitle_backend_hint)
+
+    def _log_subtitle_backend_hint(self) -> None:
+        def _worker() -> None:
+            try:
+                from modules.subtitle_engine import check_whisper_available
+
+                ok, msg = check_whisper_available(timeout_sec=12)
+            except Exception:
+                ok, msg = False, "Whisper 检测失败"
+
+            def _log() -> None:
+                try:
+                    if ok:
+                        from modules.subtitle_engine import SubtitleEngine
+
+                        SubtitleEngine._whisper_broken = False
+                        self.log(f"字幕 · {msg}")
+                    else:
+                        self.log(f"字幕 · Whisper 未就绪：{msg}")
+                        self.log("字幕 · 请双击运行 scripts\\setup_subtitle_env.bat，完成后重启本工具")
+                except Exception:
+                    pass
+
+            try:
+                self.root.after(0, _log)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=_worker, name="whisper-probe", daemon=True).start()
 
     def load_config(self):  # type: ignore[override]
         super().load_config()
@@ -805,7 +1467,13 @@ class VideoBatchToolV24(_V23):
             return
         if not self._warn_fission_branch_paths():
             return
+        self._is_paused = False
+        self._pause_event.set()
+        self._refresh_run_control_buttons()
         super().start_fission()
+        self._is_paused = False
+        self._pause_event.set()
+        self._refresh_run_control_buttons()
 
     def _warn_groups_preprocess_paths(self) -> bool:
         from modules.fission_engine import FissionBranch, resolve_branch_config
@@ -1039,6 +1707,12 @@ class VideoBatchToolV24(_V23):
     def _embed_naming_tool(self) -> None:
         if self._naming_app is not None or self._naming_host is None:
             return
+        # 上次嵌入失败可能留下半成品 UI，先清掉再重试
+        try:
+            for w in self._naming_host.winfo_children():
+                w.destroy()
+        except Exception:
+            pass
         try:
             from naming_tool import NamingToolApp
 
@@ -1050,13 +1724,17 @@ class VideoBatchToolV24(_V23):
             )
         except Exception as exc:
             self.log(f"命名工具加载失败: {exc}")
+            try:
+                for w in self._naming_host.winfo_children():
+                    w.destroy()
+            except Exception:
+                pass
 
     def _feature_var(self, key: str):
         if key == "layer":
             return getattr(self, "layer_enable", getattr(self, "logo_enable", None))
         mapping = {
             "cut": "cut_enable",
-            "enhance": "enhance_enable",
             "ratio": "ratio_enable",
             "mov_wm": "enable_mov_watermark",
             "png_wm": "png_wm_enable",
@@ -1129,6 +1807,10 @@ class VideoBatchToolV24(_V23):
 
         self._update_settings_empty_hint()
         self._refresh_pipeline_bar()
+        try:
+            apply_workbench_ttk_deep(self._settings_inner)
+        except Exception:
+            pass
         self._refresh_footer_status()
         if self._settings_canvas is not None:
             try:
@@ -1281,7 +1963,7 @@ class VideoBatchToolV24(_V23):
         row.pack(fill=X, pady=3)
         left = ttk.Frame(row)
         left.pack(side=LEFT, fill=X, expand=True)
-        title = f"{'⚠ ' if not valid else ''}{name}"
+        title = f"{ui_warning_prefix() if not valid else ''}{name}"
         ttk.Label(left, text=title, font=("Microsoft YaHei", 9, "bold")).pack(anchor="w")
         ttk.Label(
             left,
@@ -1370,6 +2052,8 @@ class VideoBatchToolV24(_V23):
         bf.pack(fill=X, padx=12, pady=12)
         ttk.Button(bf, text="取消", command=win.destroy).pack(side=RIGHT, padx=4)
         ttk.Button(bf, text="应用", command=ok).pack(side=RIGHT)
+        apply_theme_to_window(win, app=self)
+        register_themed_window(self, win)
 
     def _asset_apply_to_key(self, asset: dict, path: str, key: str) -> None:
         attr = {k: a for k, a, _ in _ASSET_APPLY_TARGETS}.get(key)
@@ -1423,27 +2107,52 @@ class VideoBatchToolV24(_V23):
         self._refresh_output_preview()
 
     def _refresh_input_tree(self) -> None:
+        folder = (self.global_input_folder.get() or "").strip()
+        if not folder or not os.path.isdir(folder):
+            tree = self._input_tree
+            if tree is not None:
+                for iid in tree.get_children():
+                    tree.delete(iid)
+            self._input_stats_var.set("选择输入文件夹")
+            return
+        self._safe_refresh_input_tree()
+
+    def _apply_input_tree(self, folder: str, files: list[str]) -> None:
         tree = self._input_tree
         if tree is None:
             return
         for iid in tree.get_children():
             tree.delete(iid)
-        folder = (self.global_input_folder.get() or "").strip()
-        if not folder or not os.path.isdir(folder):
-            self._input_stats_var.set("选择输入文件夹")
-            return
-        files = self._list_videos(folder)
         root_name = os.path.basename(folder.rstrip("\\/")) or folder
         root_id = tree.insert("", END, text=root_name, values=(f"{len(files)} 个视频",), tags=("folder",))
-        for name in files[:200]:
+        show_n = min(len(files), 200)
+        for name in files[:show_n]:
+            tree.insert(root_id, END, text=name, values=("",), tags=("video",))
+        tree.item(root_id, open=True)
+        self._input_stats_var.set(f"{root_name} · 共 {len(files)} 个视频")
+        if show_n:
+            self.root.after_idle(
+                lambda f=folder, rid=root_id, names=files[:show_n]: self._fill_input_tree_sizes(f, rid, names),
+            )
+
+    def _fill_input_tree_sizes(self, folder: str, root_id: str, names: list[str]) -> None:
+        tree = self._input_tree
+        if tree is None:
+            return
+        try:
+            children = tree.get_children(root_id)
+        except TclError:
+            return
+        for iid, name in zip(children, names):
             full = os.path.join(folder, name)
             try:
                 size_mb = f"{os.path.getsize(full) / (1024 * 1024):.1f}MB"
             except OSError:
                 size_mb = ""
-            tree.insert(root_id, END, text=name, values=(size_mb,), tags=("video",))
-        tree.item(root_id, open=True)
-        self._input_stats_var.set(f"{root_name} · 共 {len(files)} 个视频")
+            try:
+                tree.item(iid, values=(size_mb,))
+            except TclError:
+                break
 
     def _on_input_tree_select(self, _event=None) -> None:
         tree = self._input_tree
@@ -1470,6 +2179,47 @@ class VideoBatchToolV24(_V23):
         self._pick_folder(self.global_input_folder)
         self._refresh_input_tree()
 
+    def _on_input_folder_dropped(self, dirs: list[str]) -> None:
+        """拖放文件夹：加异常保护，异步刷新防止阻塞/闪退/转圈。"""
+        if not dirs:
+            return
+        try:
+            path = dirs[0]
+            if not isinstance(path, str):
+                self.log("拖放失败：路径格式异常")
+                return
+            path = path.strip()
+            if not path or not os.path.isdir(path):
+                self.log(f"拖放失败：不是有效文件夹: {path}")
+                return
+
+            self.global_input_folder.set(path)
+            self.root.after_idle(self._safe_refresh_input_tree)
+            self.status_var.set(f"已设置输入文件夹: {path}")
+            self.log(f"拖入文件夹: {path}")
+        except Exception as exc:
+            self.log(f"拖放处理异常: {exc}")
+
+    def _safe_refresh_input_tree(self) -> None:
+        """后台扫描目录，避免大文件夹拖入时卡死/闪退。"""
+        folder = (self.global_input_folder.get() or "").strip()
+        if not folder or not os.path.isdir(folder):
+            return
+        try:
+            self._input_stats_var.set("正在扫描文件夹…")
+        except Exception:
+            pass
+
+        def _worker() -> None:
+            try:
+                files = self._list_videos(folder)
+            except Exception as exc:
+                self.root.after(0, lambda: self.log(f"扫描文件夹失败: {exc}"))
+                return
+            self.root.after(0, lambda: self._apply_input_tree(folder, files))
+
+        threading.Thread(target=_worker, name="scan-input-folder", daemon=True).start()
+
     def _pick_output_and_refresh(self) -> None:
         self._pick_folder(self.global_output_folder)
         self._refresh_output_preview()
@@ -1483,8 +2233,10 @@ class VideoBatchToolV24(_V23):
     def _build_left_panel(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(0, weight=1)
-        _c, scroll_outer, body_host = make_scroll(parent)
-        scroll_outer.pack(fill=BOTH, expand=True)
+        _canvas, scroll_outer, body_host = make_scroll(parent)
+        scroll_outer.pack(fill=BOTH, expand=True, padx=4, pady=4)
+        self._left_scroll_canvas = _canvas
+        self._left_body_host = body_host
 
         # 1) 输入源（在方案模板上面）
         card, _hdr, body = self._module_card(body_host, "输入源", "📁", "input_src")
@@ -1492,18 +2244,43 @@ class VideoBatchToolV24(_V23):
         make_button(body, "选择输入文件夹", self._pick_input_and_refresh, kind="outline").pack(
             anchor="w", pady=(0, 6),
         )
+        drop_zone = tk.Label(
+            body,
+            text="拖入文件夹到此处",
+            bg=WB_CARD,
+            fg=WB_MUTED,
+            relief="groove",
+            bd=1,
+            pady=8,
+            cursor="hand2",
+        )
+        drop_zone.pack(fill=X, pady=(0, 4))
+        drop_zone.bind("<Button-1>", lambda _e: self._pick_input_and_refresh())
+        try:
+            from modules.folder_drop import drop_backend_name, hook_folder_drop
+
+            def _register_drop() -> None:
+                if hook_folder_drop(drop_zone, self._on_input_folder_dropped):
+                    self.log(f"文件夹拖放已启用 ({drop_backend_name()})")
+                else:
+                    drop_zone.config(text="拖放不可用，请用按钮选择（需 pip install windnd）")
+
+            self.root.after_idle(_register_drop)
+        except Exception:
+            pass
         ttk.Label(body, textvariable=self._input_stats_var, foreground=WB_MUTED).pack(anchor="w")
         tree_wrap = ttk.Frame(body)
-        tree_wrap.pack(fill=BOTH, expand=True, pady=(4, 0))
+        # 勿 expand：否则会占满左栏高度，把下方「功能清单」挤出可视区
+        tree_wrap.pack(fill=X, pady=(4, 0))
         self._tree_wrap = tree_wrap
-        tree = ttk.Treeview(tree_wrap, columns=("meta",), show="tree headings", height=7)
+        tree = ttk.Treeview(tree_wrap, columns=("meta",), show="tree headings", height=6)
         tree.heading("#0", text="文件夹 / 视频")
-        tree.heading("meta", text="信息")
-        tree.column("#0", width=170, stretch=True)
-        tree.column("meta", width=60, stretch=False, anchor="e")
-        ybar = ttk.Scrollbar(tree_wrap, orient=VERTICAL, command=tree.yview)
+        tree.heading("meta", text="大小")
+        tree.column("#0", width=170, stretch=True, minwidth=140)
+        tree.column("meta", width=56, stretch=False, minwidth=48, anchor="e")
+        ybar = make_tk_vscrollbar(tree_wrap, command=tree.yview)
         tree.configure(yscrollcommand=ybar.set)
-        tree.pack(side=LEFT, fill=BOTH, expand=True)
+        tree.pack(side=LEFT, fill=X, expand=True)
         ybar.pack(side=RIGHT, fill=Y)
         tree.bind("<<TreeviewSelect>>", self._on_input_tree_select)
         self._input_tree = tree
@@ -1524,7 +2301,18 @@ class VideoBatchToolV24(_V23):
         ttk.Label(body, textvariable=self._template_hint_var, foreground=WB_MUTED).pack(anchor="w", pady=(4, 0))
         self.refresh_templates()
 
-        # 3) 资产库（简化）
+        # 3) 功能清单（提前到常用素材上方，避免被挤出可视区）
+        card, _hdr, body = self._module_card(body_host, "功能清单", "✅", "features")
+        card.pack(fill=X, pady=(0, 12))
+        ttk.Label(body, text="勾选后设置出现在中间；新勾选置顶", foreground=WB_MUTED, font=("Microsoft YaHei", 9)).pack(
+            anchor="w", pady=(0, 8),
+        )
+        feat_host = tk.Frame(body, bg=WB_CARD)
+        feat_host.pack(fill=X)
+        self._feature_list_host = feat_host
+        self._populate_feature_checklist(feat_host)
+
+        # 4) 常用素材（简化）
         card, _hdr, body = self._module_card(body_host, "常用素材", "📦", "naming")
         card.pack(fill=X, pady=(0, 12))
         make_button(body, "＋ 导入素材", self._asset_import_any, kind="info").pack(fill=X, pady=(0, 6))
@@ -1544,17 +2332,6 @@ class VideoBatchToolV24(_V23):
         self._asset_list_host = ttk.Frame(body)
         self._asset_list_host.pack(fill=X)
 
-        # 4) 功能清单（无开始按钮——开始在右栏底部）
-        card, _hdr, body = self._module_card(body_host, "功能清单", "✅", "features")
-        card.pack(fill=X, pady=(0, 12))
-        ttk.Label(body, text="勾选后设置出现在中间；新勾选置顶", foreground=WB_MUTED, font=("Microsoft YaHei", 9)).pack(
-            anchor="w", pady=(0, 8),
-        )
-        for key, title, _b in _FEATURE_SPECS:
-            var = self._feature_var(key)
-            if var is not None:
-                feature_row(body, title, var, on_change=lambda k=key: self._on_feature_checkbox(k))
-
         preview_card, _hdr, body = self._module_card(body_host, "预览", "👁", "preview")
         preview_card.pack(fill=X)
         self.preview_mode_var = getattr(self, "preview_mode_var", StringVar(value="智能"))
@@ -1565,6 +2342,18 @@ class VideoBatchToolV24(_V23):
             bar, textvariable=self.preview_mode_var,
             values=["智能", "前3秒", "结尾3秒", "中间3秒"], width=8, state="readonly",
         ).pack(side=RIGHT)
+
+    def _populate_feature_checklist(self, parent) -> None:
+        """左侧功能勾选列表（与中间设置区联动）。"""
+        for w in parent.winfo_children():
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        for key, title, _b in _FEATURE_SPECS:
+            var = self._feature_var(key)
+            if var is not None:
+                feature_row(parent, title, var, on_change=lambda k=key: self._on_feature_checkbox(k))
 
     def _build_center_panel(self, parent) -> None:
         parent.columnconfigure(0, weight=1)
@@ -1608,147 +2397,236 @@ class VideoBatchToolV24(_V23):
         stack_wrap.rowconfigure(0, weight=1)
         stack_wrap.columnconfigure(0, weight=1)
         self._build_settings_stack(stack_wrap)
+        try:
+            if getattr(self, "_settings_inner", None) is not None:
+                apply_workbench_ttk_deep(self._settings_inner)
+        except Exception:
+            pass
+
+    def _lab(self, parent, text: str, *, row: int, col: int = 0, pady: int = 5):
+        """功能设置表单标签：跟卡片底色一致，避免 ttk 透明底。"""
+        from ui.workbench_skin import _on_wb_card_surface
+
+        on_card = _on_wb_card_surface(parent)
+        base = "Workbench.Card" if on_card else "Workbench"
+        return ttk.Label(parent, text=text, style=f"{base}.TLabel").grid(
+            row=row, column=col, sticky="w", padx=(0, 8), pady=pady,
+        )
 
     def _build_right_panel(self, parent) -> None:
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
+        self._queue_count_var = StringVar(value="0 个任务")
+        self._watch_status_var = StringVar(value="未开启")
 
-        # 可滚动内容区
-        mid = ttk.Frame(parent)
-        mid.grid(row=0, column=0, sticky="nsew")
-        mid.columnconfigure(0, weight=1)
-        mid.rowconfigure(3, weight=1)
-
-        card, _hdr, body = self._module_card(mid, "输出路径", "📂", "output")
-        card.pack(fill=X, pady=(0, 12))
+        card, _hdr, body = self._module_card(parent, "输出路径", "📂", "output")
+        card.pack(fill=X, pady=(0, 10))
         ttk.Label(body, text="输出文件夹 / 裂变输出根").pack(anchor="w")
-        ttk.Entry(body, textvariable=self.global_output_folder).pack(fill=X, pady=(4, 8))
+        ttk.Entry(body, textvariable=self.global_output_folder).pack(fill=X, pady=(4, 6))
         row = ttk.Frame(body)
         row.pack(fill=X)
         make_button(row, "选择", self._pick_output_and_refresh, kind="outline", width=7).pack(side=LEFT)
         make_button(row, "打开", self.open_global_output, kind="outline", width=7).pack(side=LEFT, padx=4)
         make_button(row, "清空", self._clear_output_path, kind="danger", width=7).pack(side=LEFT)
-        ttk.Label(body, textvariable=self._output_preview_var, wraplength=300, foreground=WB_MUTED).pack(
-            anchor="w", pady=(8, 0),
+        ttk.Label(body, textvariable=self._output_preview_var, wraplength=340, foreground=WB_MUTED).pack(
+            anchor="w", pady=(6, 0),
         )
 
-        card, _hdr, body = self._module_card(mid, "规范命名", "🏷️", "naming")
-        card.pack(fill=X, pady=(0, 12))
-        ttk.Label(body, text="内嵌 Sheet，不必另开程序。", foreground=WB_MUTED, wraplength=300).pack(
-            anchor="w", pady=(0, 8),
-        )
+        card, _hdr, body = self._module_card(parent, "规范命名", "🏷️", "naming")
+        card.pack(fill=X, pady=(0, 10))
         make_button(body, "切换到命名页", self.open_naming_tool, kind="info").pack(fill=X)
         make_button(body, "保存配置", self.save_config, kind="outline").pack(fill=X, pady=(6, 0))
 
-        # 生产队列（页面级 UX 骨架）
-        card, _hdr, body = self._module_card(mid, "生产队列", "🧾", "queue")
-        card.pack(fill=X, pady=(0, 12))
-        ttk.Label(
-            body,
-            text="把当前设置加入队列，按顺序批量处理（先做骨架与可运行单队列执行）。",
-            foreground=WB_MUTED,
-            wraplength=320,
-            font=("", 9),
-        ).pack(anchor="w", pady=(0, 8))
+        q_shell, q_hdr, q_body, _q_toggle = collapsible_section(
+            parent, "生产队列", icon="🧾", expanded=False,
+        )
+        q_shell.pack(fill=X, pady=(0, 10))
+        self._queue_badge = tk.Label(
+            q_hdr, text="0", font=("Arial", 8, "bold"),
+            bg=WB_BORDER, fg=WB_MUTED, width=3, relief="solid", bd=1,
+        )
+        self._queue_badge.pack(side=RIGHT, padx=(4, 8))
+        tk.Label(
+            q_hdr, textvariable=self._queue_count_var, bg=WB_CARD, fg=WB_MUTED,
+            font=("Microsoft YaHei", 9),
+        ).pack(side=LEFT, padx=(6, 0))
 
-        q_btns = ttk.Frame(body)
-        q_btns.pack(fill=X)
-        make_button(q_btns, "加当前批处理", self._queue_add_current_job, kind="outline", width=12).pack(
+        q_quick = tk.Frame(q_shell, bg=WB_CARD)
+        q_quick.pack(fill=X, padx=12, pady=(0, 10))
+        make_button(q_quick, "＋批处理", self._queue_add_current_job, kind="outline", width=8).pack(
             side=LEFT, padx=(0, 4),
         )
-        make_button(q_btns, "加当前裂变", self._queue_add_current_fission_job, kind="outline", width=12).pack(
-            side=LEFT, padx=(4, 0),
+        make_button(q_quick, "＋裂变", self._queue_add_current_fission_job, kind="outline", width=7).pack(
+            side=LEFT, padx=(0, 4),
         )
-        make_button(q_btns, "开始队列", self._queue_start_jobs, kind="success", width=10).pack(
-            side=LEFT, padx=(8, 0),
+        self._queue_pause_btn = make_button(
+            q_quick, ui_pause_label(paused=False, compact=True), self._toggle_pause, kind="outline", width=5 if is_mac() else 4,
         )
-        make_button(q_btns, "清空", self._queue_clear_jobs, kind="danger", width=8).pack(
-            side=LEFT, padx=(8, 0),
+        self._queue_pause_btn.pack(side=LEFT, padx=(0, 2))
+        self._queue_stop_btn = make_button(
+            q_quick, ui_stop_label(compact=True), self._ui_batch_stop, kind="danger", width=5 if is_mac() else 4,
         )
+        self._queue_stop_btn.pack(side=LEFT, padx=(0, 4))
+        make_button(q_quick, "开始队列", self._queue_start_jobs, kind="success", width=9).pack(
+            side=LEFT, padx=(0, 4),
+        )
+        make_button(q_quick, "清空", self._queue_clear_jobs, kind="danger", width=6).pack(side=LEFT)
 
-        retry_row = ttk.Frame(body)
-        retry_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(retry_row, text="失败重试(次):", foreground=WB_MUTED).pack(side=LEFT)
+        ttk.Label(
+            q_body,
+            text=ui_queue_expand_hint(),
+            foreground=WB_MUTED,
+            wraplength=280,
+            font=("", 8),
+        ).pack(anchor="w", pady=(0, 6))
+
+        retry_row = ttk.Frame(q_body)
+        retry_row.pack(fill=X, pady=(0, 4))
+        ttk.Label(retry_row, text="失败重试:", foreground=WB_MUTED).pack(side=LEFT)
         self._queue_retry_var = StringVar(value="1")
         ttk.Combobox(
-            retry_row, textvariable=self._queue_retry_var, width=6, state="readonly",
+            retry_row, textvariable=self._queue_retry_var, width=5, state="readonly",
             values=["0", "1", "2", "3"],
         ).pack(side=LEFT, padx=(6, 0))
 
-        self._queue_tree = ttk.Treeview(body, columns=("st", "inp", "out"), show="headings", height=4)
+        tree_wrap = ttk.Frame(q_body)
+        tree_wrap.pack(fill=X)
+        self._queue_tree = ttk.Treeview(tree_wrap, columns=("st", "inp", "out"), show="headings", height=4)
         self._queue_tree.heading("st", text="状态")
         self._queue_tree.heading("inp", text="输入")
         self._queue_tree.heading("out", text="输出")
-        self._queue_tree.column("st", width=60, stretch=False, anchor="center")
-        self._queue_tree.column("inp", width=140, stretch=True, anchor="w")
-        self._queue_tree.column("out", width=140, stretch=True, anchor="w")
-        self._queue_tree.pack(fill=X, pady=(8, 0))
+        self._queue_tree.column("st", width=56, stretch=False, anchor="center")
+        self._queue_tree.column("inp", width=110, stretch=True, anchor="w")
+        self._queue_tree.column("out", width=110, stretch=True, anchor="w")
+        q_vsb = make_tk_vscrollbar(tree_wrap, command=self._queue_tree.yview)
+        self._queue_tree.configure(yscrollcommand=q_vsb.set)
+        self._queue_tree.pack(side=LEFT, fill=X, expand=True)
+        q_vsb.pack(side=RIGHT, fill=Y)
 
-        # Watch Folder：监视子文件夹，扫描一次可直接加入队列
-        watch_card, _wh, watch_body = self._module_card(mid, "监视文件夹", "👁️", "watch")
-        watch_card.pack(fill=X, pady=(0, 12))
-        ttk.Label(
-            watch_body,
-            text="把素材投放到监视目录的子文件夹中；点击「扫描并加入队列」会识别新子文件夹并加入队列。",
-            foreground=WB_MUTED,
-            wraplength=320,
-            font=("", 9),
-        ).pack(anchor="w", pady=(0, 6))
+        w_shell, w_hdr, w_body, _w_toggle = collapsible_section(
+            parent, "监视文件夹", icon="👁", expanded=False,
+        )
+        w_shell.pack(fill=X, pady=(0, 10))
+        self._watch_indicator = tk.Label(
+            w_hdr, text="●", font=("Arial", 11), fg="#cccccc", bg=WB_CARD,
+        )
+        self._watch_indicator.pack(side=RIGHT, padx=(4, 8))
+        tk.Label(
+            w_hdr, textvariable=self._watch_status_var, bg=WB_CARD, fg=WB_MUTED,
+            font=("Microsoft YaHei", 9),
+        ).pack(side=RIGHT, padx=(0, 4))
 
         self._watch_in_var = StringVar(value="")
         self._watch_out_var = StringVar(value="")
-        self._watch_interval_var = StringVar(value="30")  # 秒
+        self._watch_interval_var = StringVar(value="30")
 
-        w1 = ttk.Frame(watch_body)
-        w1.pack(fill=X)
-        ttk.Entry(w1, textvariable=self._watch_in_var).pack(side=LEFT, fill=X, expand=True)
+        w1 = ttk.Frame(w_body)
+        w1.pack(fill=X, pady=(0, 4))
+        ttk.Label(w1, text="监视", width=4).pack(side=LEFT)
+        ttk.Entry(w1, textvariable=self._watch_in_var).pack(side=LEFT, fill=X, expand=True, padx=(4, 4))
         make_button(
             w1, "浏览", lambda: self._pick_dir(self._watch_in_var, "选择监视目录"),
-            kind="outline", width=6,
-        ).pack(side=LEFT, padx=(6, 0))
+            kind="outline", width=5,
+        ).pack(side=LEFT)
 
-        w2 = ttk.Frame(watch_body)
-        w2.pack(fill=X, pady=(6, 0))
-        ttk.Entry(w2, textvariable=self._watch_out_var).pack(side=LEFT, fill=X, expand=True)
+        w2 = ttk.Frame(w_body)
+        w2.pack(fill=X, pady=(0, 6))
+        ttk.Label(w2, text="输出", width=4).pack(side=LEFT)
+        ttk.Entry(w2, textvariable=self._watch_out_var).pack(side=LEFT, fill=X, expand=True, padx=(4, 4))
         make_button(
             w2, "浏览", lambda: self._pick_dir(self._watch_out_var, "选择监视输出根"),
-            kind="outline", width=6,
-        ).pack(side=LEFT, padx=(6, 0))
+            kind="outline", width=5,
+        ).pack(side=LEFT)
 
-        w3 = ttk.Frame(watch_body)
+        wbtns = ttk.Frame(w_body)
+        wbtns.pack(fill=X)
+        make_button(wbtns, "扫描入队", self._watch_scan_once_and_add, kind="outline", width=9).pack(
+            side=LEFT, padx=(0, 4),
+        )
+        make_button(wbtns, "开始监视", self._watch_start_monitor, kind="info", width=9).pack(
+            side=LEFT, padx=(0, 4),
+        )
+        make_button(wbtns, "停止", self._watch_stop_monitor, kind="danger", width=6).pack(side=LEFT)
+
+        w3 = ttk.Frame(w_body)
         w3.pack(fill=X, pady=(6, 0))
-        ttk.Label(w3, text="轮询(秒):").pack(side=LEFT)
+        ttk.Label(w3, text="轮询(秒)", foreground=WB_MUTED).pack(side=LEFT)
         ttk.Entry(w3, textvariable=self._watch_interval_var, width=6).pack(side=LEFT, padx=(6, 0))
+        ttk.Label(
+            w3, text="新子文件夹 → 自动加入队列", foreground=WB_MUTED, font=("", 8),
+        ).pack(side=LEFT, padx=(8, 0))
 
-        wbtns = ttk.Frame(watch_body)
-        wbtns.pack(fill=X, pady=(8, 0))
-        make_button(wbtns, "扫描并加入队列", self._watch_scan_once_and_add, kind="outline", width=16).pack(
-            side=LEFT, padx=(0, 6),
-        )
-        make_button(wbtns, "开始监视", self._watch_start_monitor, kind="info", width=10).pack(
-            side=LEFT, padx=(0, 6),
-        )
-        make_button(wbtns, "停止", self._watch_stop_monitor, kind="danger", width=8).pack(side=LEFT)
+        card, _hdr, body = self._module_card(parent, "进度与日志", "📊", "progress")
+        card.pack(fill=BOTH, expand=True, pady=(0, 10))
 
-        card, _hdr, body = self._module_card(mid, "处理进度", "📊", "progress")
-        card.pack(fill=X, pady=(0, 12))
-        ttk.Label(body, textvariable=self.status_var, wraplength=300).pack(anchor="w", pady=(0, 6))
+        prog_row = tk.Frame(body, bg=WB_CARD)
+        prog_row.pack(fill=X, pady=(0, 6))
+        tk.Label(
+            prog_row, textvariable=self.status_var, bg=WB_CARD, fg=WB_TEXT,
+            font=("Microsoft YaHei", 9), anchor="w",
+        ).pack(side=LEFT, fill=X, expand=True)
         try:
             self.progress.pack_forget()
         except Exception:
             pass
-        self.progress = ttk.Progressbar(body, orient="horizontal", mode="determinate")
-        self.progress.pack(fill=X)
+        self.progress = ttk.Progressbar(
+            prog_row, orient="horizontal", mode="determinate", length=120,
+            style="Workbench.TProgressbar",
+        )
+        self.progress.pack(side=RIGHT)
 
-        self._log_outer = ttk.Frame(mid)
+        self._log_outer = ttk.Frame(body)
         self._log_outer.pack(fill=BOTH, expand=True)
         self.build_log_section()
 
-        # 底部固定操作区：不用滚到左栏才能点开始
-        actions = ttk.Frame(parent)
-        actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        make_button(actions, "开始批处理（当前方案）", self.start_batch, kind="success").pack(fill=X, pady=(0, 6))
-        make_button(actions, "打开批量裂变页", self.open_fission_tab, kind="info").pack(fill=X)
+    def _build_right_actions(self, parent) -> None:
+        action_frame = tk.Frame(parent, bg=WB_BG)
+        action_frame.pack(fill=X, pady=(8, 0))
+
+        self._batch_btn = tk.Button(
+            action_frame,
+            text=ui_start_batch_label(),
+            font=("Microsoft YaHei", 11, "bold"),
+            bg="#2e7d32",
+            fg="#ffffff",
+            activebackground="#1b5e20",
+            activeforeground="#ffffff",
+            bd=0,
+            relief="flat",
+            cursor="hand2",
+            command=self.start_batch,
+        )
+        self._batch_btn.pack(fill=X, ipady=10)
+
+        self._pause_btn = tk.Button(
+            action_frame,
+            text=ui_pause_label(paused=False),
+            font=("Microsoft YaHei", 10),
+            bg="#f5a623",
+            fg="#ffffff",
+            activebackground="#d48c1a",
+            activeforeground="#ffffff",
+            bd=0,
+            relief="flat",
+            cursor="hand2",
+            command=self._toggle_pause,
+            state="disabled",
+        )
+        self._pause_btn.pack(fill=X, pady=(6, 0), ipady=8)
+
+        tk.Button(
+            action_frame,
+            text="打开批量裂变页 →",
+            font=("Microsoft YaHei", 10),
+            bg=WB_CARD,
+            fg=WB_TEXT,
+            activebackground=WB_BORDER,
+            activeforeground=WB_TEXT,
+            bd=1,
+            relief="solid",
+            cursor="hand2",
+            command=self.open_fission_tab,
+        ).pack(fill=X, pady=(8, 0), ipady=6)
+
+        self._refresh_run_control_buttons()
 
     # ----- 生产队列 / Watch Folder（V24 页面级 UX） -----
 
@@ -1776,13 +2654,22 @@ class VideoBatchToolV24(_V23):
                     (job.get("output") or "")[:34],
                 ),
             )
+        n = len(self._job_queue)
+        if hasattr(self, "_queue_count_var"):
+            self._queue_count_var.set(f"{n} 个任务" if n else "0 个任务")
+        badge = getattr(self, "_queue_badge", None)
+        if badge is not None:
+            if n > 0:
+                badge.configure(bg="#2e7d32", fg="#ffffff", text=str(n))
+            else:
+                badge.configure(bg=WB_BORDER, fg=WB_MUTED, text="0")
 
     def _queue_add_current_job(self) -> None:
         if getattr(self, "_job_queue_running", False):
             messagebox.showwarning("提示", "队列正在运行中，请稍后")
             return
         try:
-            cfg = dict(self._current_config_dict())
+            cfg = copy.deepcopy(self._current_config_dict())
         except Exception as exc:
             messagebox.showerror("错误", f"无法读取当前配置：{exc}")
             return
@@ -1831,22 +2718,26 @@ class VideoBatchToolV24(_V23):
             messagebox.showwarning("提示", "请先配置至少一个启用的裂变方案")
             return
 
-        from modules.fission_engine import branch_to_dict, source_group_to_dict
+        from modules.fission_engine import branch_to_dict, resolve_group_branches, source_group_to_dict
 
         payload = []
+        panel = getattr(self, "_fission_panel", None)
+        io_mode = getattr(getattr(panel, "_io_mode", None), "get", lambda: "单源")()
+        single_source = io_mode != "多源"
         for g in groups:
-            selected = set(g.selected_branch_names or [])
-            picked = [b for b in branches if not selected or b.branch_name in selected]
-            if not picked:
+            selected = resolve_group_branches(
+                g, branches, empty_means_all=single_source,
+            )
+            if not selected:
                 continue
-            payload.append((source_group_to_dict(g), [branch_to_dict(b) for b in picked]))
+            payload.append((source_group_to_dict(g), [branch_to_dict(b) for b in selected]))
         if not payload:
             messagebox.showwarning("提示", "当前源组没有匹配到可运行的裂变方案")
             return
 
         # snapshot 让裂变结束后能还原当前工作台状态
         try:
-            snapshot = dict(self._current_config_dict())
+            snapshot = copy.deepcopy(self._current_config_dict())
         except Exception:
             snapshot = {}
 
@@ -1881,6 +2772,12 @@ class VideoBatchToolV24(_V23):
             return
 
         self._job_queue_running = True
+        self._is_paused = False
+        self._pause_event.set()
+        try:
+            self.root.after(0, self._refresh_run_control_buttons)
+        except Exception:
+            pass
         jobs = list(self._job_queue)
 
         def _set_job_status(job_id: int, status: str) -> None:
@@ -1906,6 +2803,7 @@ class VideoBatchToolV24(_V23):
             import shutil
 
             for job in jobs:
+                self._check_pause(timeout=0.5)
                 job_id = int(job.get("id"))
                 kind = str(job.get("kind") or "batch")
 
@@ -1998,7 +2896,10 @@ class VideoBatchToolV24(_V23):
 
             def _done():
                 self._job_queue_running = False
+                self._is_paused = False
+                self._pause_event.set()
                 self._queue_render()
+                self._refresh_run_control_buttons()
 
             self.root.after(0, _done)
 
@@ -2057,7 +2958,7 @@ class VideoBatchToolV24(_V23):
 
             self._watch_seen_dirs.add(p)
             try:
-                cfg = dict(self._current_config_dict())
+                cfg = copy.deepcopy(self._current_config_dict())
             except Exception:
                 continue
             cfg["global_input"] = p
@@ -2091,6 +2992,11 @@ class VideoBatchToolV24(_V23):
             messagebox.showwarning("提示", "请先选择有效的监视目录")
             return
         self._watch_monitor_running = True
+        if hasattr(self, "_watch_status_var"):
+            self._watch_status_var.set("监视中…")
+        ind = getattr(self, "_watch_indicator", None)
+        if ind is not None:
+            ind.configure(fg="#4caf50")
 
         import threading
         import time
@@ -2111,6 +3017,11 @@ class VideoBatchToolV24(_V23):
 
     def _watch_stop_monitor(self) -> None:
         self._watch_monitor_running = False
+        if hasattr(self, "_watch_status_var"):
+            self._watch_status_var.set("未开启")
+        ind = getattr(self, "_watch_indicator", None)
+        if ind is not None:
+            ind.configure(fg="#cccccc")
 
 
     def _apply_global_memory(self, *, force_autoload: bool = False) -> None:
@@ -2202,6 +3113,8 @@ class VideoBatchToolV24(_V23):
         win.grab_set()
         win.geometry("580x720")
 
+        from ui.workbench_skin import apply_theme_to_window, register_themed_window
+
         nb = ttk.Notebook(win)
         nb.pack(fill=BOTH, expand=True, padx=10, pady=10)
         tab_g = ttk.Frame(nb)
@@ -2210,27 +3123,38 @@ class VideoBatchToolV24(_V23):
         nb.add(tab_g, text="常规")
         nb.add(tab_f, text="批量裂变")
         nb.add(tab_a, text="高级")
+        for tab in (tab_g, tab_f, tab_a):
+            try:
+                tab.configure(style="Workbench.TFrame")
+            except TclError:
+                pass
 
         tab_var = StringVar(value=str(pref.get("default_tab") or "视频批处理"))
         view_var = StringVar(value=str(pref.get("default_view") or "思维导图"))
-        theme_var = StringVar(value=str(pref.get("default_theme") or "奶油可爱"))
+        from ui.app_theme import APP_SKIN_LABELS as _APP_SKIN_LABELS
+
+        theme_var = StringVar(value=str(pref.get("default_theme") or "简约工作台"))
+        if theme_var.get() not in _APP_SKIN_LABELS:
+            theme_var.set("简约工作台")
         batch_auto_var = StringVar(value=str(pref.get("batch_autoload") or habi_memory.AUTOLOAD_NONE))
-        fission_auto_var = StringVar(value=str(pref.get("fission_autoload") or habi_memory.AUTOLOAD_NONE))
+        fission_auto_var = StringVar(value=habi_memory.normalize_fission_autoload(
+            str(pref.get("fission_autoload") or habi_memory.AUTOLOAD_NONE),
+            template_names=None,
+        ))
         out_var = StringVar(value=str(pref.get("default_output_path") or ""))
         naming_var = StringVar(value=str(pref.get("naming_template") or "{scheme}_{date}_{index}"))
         tips_var = tk.BooleanVar(value=bool(pref.get("show_tips", True)))
         auto_name_var = tk.BooleanVar(value=bool(pref.get("auto_open_naming_after_fission", False)))
         backup_var = tk.BooleanVar(value=bool(pref.get("batch_backup_enable", False)))
 
-        from modules.ui_skin import THEME_LABELS_ZH, THEME_NAMES
-        cur_ui = str(getattr(self.root, "_ui_theme", None) or "flatly")
-        ui_theme_choices = [UI_THEME_NONE] + list(THEME_NAMES)
-        ui_theme_labels = {
-            UI_THEME_NONE: "无主题（经典皮肤）",
-            **{k: THEME_LABELS_ZH.get(k, k) for k in THEME_NAMES},
-        }
-        ui_label_to_key = {v: k for k, v in ui_theme_labels.items()}
-        ui_theme_var = StringVar(value=ui_theme_labels.get(cur_ui, ui_theme_labels.get("flatly", "浅色清爽")))
+        def _coerce_combo(var: StringVar, values: list[str], default: str) -> None:
+            if var.get() not in values:
+                var.set(default)
+
+        tab_values = ["视频批处理", "规范命名", "批量裂变"]
+        view_values = ["思维导图", "地铁线路", "列表"]
+        _coerce_combo(tab_var, tab_values, "视频批处理")
+        _coerce_combo(view_var, view_values, "思维导图")
 
         def row(parent, r, label, widget):
             ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", padx=8, pady=6)
@@ -2248,66 +3172,77 @@ class VideoBatchToolV24(_V23):
         except Exception:
             tpl_names = []
         last = str(pref.get("last_used_scheme") or "").strip()
-        autoload_values = [habi_memory.AUTOLOAD_NONE, habi_memory.AUTOLOAD_LAST, *tpl_names]
-        if last and last not in autoload_values:
-            autoload_values.append(last)
-        for var in (batch_auto_var, fission_auto_var):
-            if var.get() not in autoload_values:
-                var.set(habi_memory.AUTOLOAD_NONE)
-        tip_last = f"（上次：{last}）" if last else "（尚无上次记录）"
+        batch_autoload_values = [habi_memory.AUTOLOAD_NONE, habi_memory.AUTOLOAD_LAST, *tpl_names]
+        if last and last not in batch_autoload_values:
+            batch_autoload_values.append(last)
+        fission_autoload_values = habi_memory.build_fission_autoload_choices(pref, template_names=tpl_names)
+        last_plan = str(pref.get("last_used_fission_plan") or "").strip()
+        _coerce_combo(batch_auto_var, batch_autoload_values, habi_memory.AUTOLOAD_NONE)
+        _coerce_combo(fission_auto_var, fission_autoload_values, habi_memory.AUTOLOAD_NONE)
+        fission_auto_var.set(habi_memory.normalize_fission_autoload(fission_auto_var.get()))
+        _coerce_combo(fission_auto_var, fission_autoload_values, habi_memory.AUTOLOAD_NONE)
+        tip_last = f"（上次模板：{last}）" if last else "（尚无上次模板）"
+        tip_plan = f"（上次组合：{last_plan}）" if last_plan else "（尚无上次组合，可先在裂变页「保存组合」）"
         row(tab_g, 1, "视频批处理默认加载", ttk.Combobox(
             tab_g, textvariable=batch_auto_var, state="readonly", width=28,
-            values=autoload_values,
-        ))
-        row(tab_g, 2, "批量裂变默认加载", ttk.Combobox(
-            tab_g, textvariable=fission_auto_var, state="readonly", width=28,
-            values=autoload_values,
+            values=batch_autoload_values,
         ))
         ttk.Label(
             tab_g,
-            text=f"打开时自动套方案（勾选+路径）。两页可分开设。{tip_last}",
+            text=f"打开时自动套批处理方案模板。{tip_last}",
             foreground=WB_MUTED, font=("", 8), wraplength=440,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
-        row(tab_g, 4, "界面主题", ttk.Combobox(
-            tab_g, textvariable=ui_theme_var, state="readonly", width=28,
-            values=[ui_theme_labels[k] for k in ui_theme_choices],
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+        row(tab_g, 3, "界面皮肤", skin_cb := ttk.Combobox(
+            tab_g, textvariable=theme_var, state="readonly", width=28,
+            values=list(_APP_SKIN_LABELS),
         ))
         ttk.Label(
-            tab_g, text="经典皮肤需重启后生效；其它主题保存后立即切换。",
-            foreground=WB_MUTED, font=("", 8),
-        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
+            tab_g,
+            text="批处理、规范命名、批量裂变共用；勾选框勾选后显示主题色。"
+            "「无主题」= 经典灰皮。保存后立即生效。",
+            foreground=WB_MUTED, font=("", 8), wraplength=440,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
 
-        row(tab_f, 0, "默认输出根路径", ttk.Entry(tab_f, textvariable=out_var, width=30))
+        row(tab_f, 0, "裂变打开时自动加载", ttk.Combobox(
+            tab_f, textvariable=fission_auto_var, state="readonly", width=36,
+            values=fission_autoload_values,
+        ))
+        ttk.Label(
+            tab_f,
+            text=(
+                "默认打开页为「批量裂变」时生效；也可随时在此指定。"
+                "「方案模板」= 画布挂一个模板；「方案组合」= 加载 fission_plans 里保存的多方案画布。"
+                f"{tip_last}  {tip_plan}"
+            ),
+            foreground=WB_MUTED, font=("", 8), wraplength=460,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 6))
+        row(tab_f, 2, "默认输出根路径", ttk.Entry(tab_f, textvariable=out_var, width=30))
 
         def browse_out():
             p = filedialog.askdirectory(parent=win, title="默认裂变输出根")
             if p:
                 out_var.set(p)
 
-        make_button(tab_f, "浏览…", browse_out, kind="outline", width=8).grid(row=0, column=2, padx=4)
-        row(tab_f, 1, "裂变默认视图", ttk.Combobox(
+        make_button(tab_f, "浏览…", browse_out, kind="outline", width=8).grid(row=2, column=2, padx=4)
+        row(tab_f, 3, "裂变默认视图", ttk.Combobox(
             tab_f, textvariable=view_var, state="readonly", width=28,
             values=["思维导图", "地铁线路", "列表"],
         ))
-        row(tab_f, 2, "裂变画布皮肤", ttk.Combobox(
-            tab_f, textvariable=theme_var, state="readonly", width=28,
-            values=["奶油可爱", "经典蓝白", "黑紫赛博", "绿黄养眼"],
-        ))
-        row(tab_f, 3, "命名格式提示", ttk.Entry(tab_f, textvariable=naming_var, width=30))
+        row(tab_f, 4, "命名格式提示", ttk.Entry(tab_f, textvariable=naming_var, width=30))
         ttk.Label(
             tab_f,
             text="可用占位：{方案名} {日期} {序号} —— 上框可写英文占位供程序识别，"
                  "例如 {scheme}_{date}_{index} = 方案_日期_序号",
             foreground=WB_MUTED, wraplength=460, font=("", 8),
-        ).grid(row=4, column=0, columnspan=3, sticky="w", padx=8)
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8)
         ttk.Checkbutton(
             tab_f, text="裂变完成后提示打开「规范命名」", variable=auto_name_var,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=6)
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=6)
         ttk.Label(
             tab_f,
             text="流畅命名：方案名=输出子文件夹 → 批处理出片 → 规范命名页统一改文件名",
             foreground=WB_MUTED, wraplength=460, font=("", 8),
-        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8)
+        ).grid(row=7, column=0, columnspan=3, sticky="w", padx=8)
 
         ttk.Checkbutton(tab_a, text="显示操作提示", variable=tips_var).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=8, pady=8,
@@ -2339,8 +3274,8 @@ class VideoBatchToolV24(_V23):
             foreground=WB_MUTED, wraplength=460, font=("", 8),
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8)
 
-        def _persist_ui_theme(theme_key: str) -> None:
-            self.root._ui_theme = theme_key  # noqa: SLF001
+        def _persist_app_skin(skin_label: str) -> None:
+            skin = skin_label if skin_label in _APP_SKIN_LABELS else "简约工作台"
             try:
                 path = config_path("video_batch_config_v21.json")
                 cfg: dict = {}
@@ -2349,31 +3284,25 @@ class VideoBatchToolV24(_V23):
                         raw = json.load(f)
                     if isinstance(raw, dict):
                         cfg = raw
-                cfg["ui_theme"] = theme_key
+                cfg["ui_theme"] = UI_THEME_NONE if is_none_skin(skin) else skin
+                cfg["app_skin"] = skin
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
-            if theme_key == UI_THEME_NONE:
-                messagebox.showinfo(
-                    "界面主题",
-                    "已选择经典皮肤。请关闭并重新打开程序后生效。",
-                    parent=win,
-                )
-                return
             try:
-                self.root.style.theme_use(theme_key)
-                self.root._bootstrap_theme = theme_key  # noqa: SLF001
+                self._apply_app_skin(skin)
             except Exception:
                 pass
 
         def save_and_apply():
+            skin = theme_var.get() if theme_var.get() in _APP_SKIN_LABELS else "简约工作台"
             habi_memory.update_prefs(
                 default_tab=tab_var.get(),
                 default_view=view_var.get(),
-                default_theme=theme_var.get(),
+                default_theme=skin,
                 batch_autoload=batch_auto_var.get(),
-                fission_autoload=fission_auto_var.get(),
+                fission_autoload=habi_memory.normalize_fission_autoload(fission_auto_var.get()),
                 default_output_path=out_var.get().strip(),
                 naming_template=naming_var.get().strip(),
                 show_tips=bool(tips_var.get()),
@@ -2383,11 +3312,22 @@ class VideoBatchToolV24(_V23):
             )
             for choice in (batch_auto_var.get(), fission_auto_var.get()):
                 c = (choice or "").strip()
-                if c and c not in (habi_memory.AUTOLOAD_NONE, habi_memory.AUTOLOAD_LAST):
+                if not c or c in (
+                    habi_memory.AUTOLOAD_NONE,
+                    habi_memory.AUTOLOAD_LAST,
+                    habi_memory.AUTOLOAD_LAST_PLAN,
+                ):
+                    continue
+                if c.startswith(habi_memory.FISSION_PREFIX_PLAN):
+                    habi_memory.remember_fission_plan(c[len(habi_memory.FISSION_PREFIX_PLAN):])
+                elif c.startswith(habi_memory.FISSION_PREFIX_TEMPLATE):
+                    habi_memory.remember_scheme(c[len(habi_memory.FISSION_PREFIX_TEMPLATE):])
+                elif choice == fission_auto_var.get():
                     habi_memory.remember_scheme(c)
-                    break
-            theme_key = ui_label_to_key.get(ui_theme_var.get(), "flatly")
-            _persist_ui_theme(theme_key)
+                else:
+                    habi_memory.remember_scheme(c)
+                break
+            _persist_app_skin(skin)
             self._apply_global_memory(force_autoload=True)
             win.destroy()
             self.status_var.set("偏好已保存到记忆空间")
@@ -2396,7 +3336,9 @@ class VideoBatchToolV24(_V23):
             d = habi_memory.default_memory()["user_preferences"]
             tab_var.set(d["default_tab"])
             view_var.set(d["default_view"])
-            theme_var.set(d["default_theme"])
+            theme_var.set(
+                d.get("default_theme") if d.get("default_theme") in _APP_SKIN_LABELS else "简约工作台",
+            )
             batch_auto_var.set(d.get("batch_autoload") or habi_memory.AUTOLOAD_NONE)
             fission_auto_var.set(d.get("fission_autoload") or habi_memory.AUTOLOAD_NONE)
             out_var.set(d.get("default_output_path") or "")
@@ -2404,7 +3346,6 @@ class VideoBatchToolV24(_V23):
             tips_var.set(bool(d.get("show_tips", True)))
             auto_name_var.set(False)
             backup_var.set(False)
-            ui_theme_var.set(ui_theme_labels.get("flatly", "浅色清爽"))
 
         def wipe_memory_factory():
             if not messagebox.askyesno(
@@ -2438,12 +3379,52 @@ class VideoBatchToolV24(_V23):
         make_button(bf, "取消", win.destroy, kind="outline").pack(side=RIGHT, padx=4)
         make_button(bf, "保存并应用", save_and_apply, kind="success").pack(side=RIGHT)
 
+        try:
+            nb.configure(style="Workbench.TNotebook")
+        except TclError:
+            pass
+
+        def _preview_skin(_event=None) -> None:
+            skin = theme_var.get()
+            if skin in _APP_SKIN_LABELS:
+                try:
+                    self._apply_app_skin(skin)
+                    apply_theme_to_window(win, app=self)
+                except Exception:
+                    pass
+
+        skin_cb.bind("<<ComboboxSelected>>", _preview_skin)
+
+        def _force_recolor(widget: tk.Misc) -> None:
+            try:
+                cls = widget.winfo_class()
+                if cls in ("Frame", "Toplevel", "LabelFrame"):
+                    widget.configure(bg=WB_BG)
+                elif cls == "Label":
+                    widget.configure(bg=WB_BG, fg=WB_TEXT)
+                elif cls == "Button":
+                    widget.configure(bg=WB_CARD, fg=WB_TEXT)
+                elif cls in ("Entry", "Text"):
+                    widget.configure(bg=WB_CARD, fg=WB_TEXT, insertbackground=WB_TEXT)
+            except TclError:
+                pass
+            for child in widget.winfo_children():
+                _force_recolor(child)
+
+        apply_theme_to_window(win, app=self)
+        _force_recolor(win)
+        try:
+            self._fix_white_blocks(win, workbench_palette())
+        except Exception:
+            pass
+        register_themed_window(self, win)
+
     def build_subtitle_section(self, row, col):
         # 该功能是否执行由左侧「功能勾选」控制；这里只负责创建参数变量
         self.subtitle_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
             self.main_frame,
-            "字幕识别/翻译/烧录",
+            "字幕（识别 / 外部烧录）",
             "💬",
             "subtitle",
             enable_var=self.subtitle_enable,
@@ -2451,105 +3432,467 @@ class VideoBatchToolV24(_V23):
         self._grid_card(card, row, col)
         self._configure_form_grid(frame)
 
+        self.subtitle_work_mode = StringVar(value="AI 识别/翻译 → SRT")
         self.subtitle_src_lang = StringVar(value="自动检测(auto)")
         self.subtitle_tgt_lang = StringVar(value="中文(zh)")
-        self.subtitle_model_size = StringVar(value="small")
-        self.subtitle_burn_in = BooleanVar(value=True)
-        self.subtitle_font_name = StringVar(value="Microsoft YaHei")
+        self.subtitle_output_mode = StringVar(value="双语并存(单文件)")
+        self.subtitle_model_size = StringVar(value="base")
+        self.subtitle_srt_source = StringVar(value="与视频同目录（同名 .srt）")
+        self.subtitle_srt_folder = StringVar(value="")
+        self.subtitle_fixed_srt = StringVar(value="")
+        self.subtitle_font_name = StringVar(value="Arial Unicode MS")
+        self.subtitle_font_status = StringVar(value="")
 
-        self._lab(frame, "源语言(Whisper):", row=1)
-        ttk.Combobox(
+        self._lab(frame, "工作模式:", row=0)
+        work_combo = ttk.Combobox(
             frame,
+            textvariable=self.subtitle_work_mode,
+            values=["AI 识别/翻译 → SRT", "外部 SRT → 烧录到视频"],
+            width=22,
+            state="readonly",
+        )
+        work_combo.grid(row=0, column=1, sticky="ew", padx=4, pady=5)
+        work_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_subtitle_work_mode_changed())
+
+        self._subtitle_ai_frame = ttk.Frame(frame)
+        self._subtitle_ai_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self._subtitle_ai_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            self._subtitle_ai_frame,
+            text="Whisper 本地识别 + 可选联网翻译，只导出 .srt，不改动视频。",
+            foreground=WB_MUTED,
+            wraplength=420,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
+        self._lab(self._subtitle_ai_frame, "源语言(Whisper):", row=1)
+        ttk.Combobox(
+            self._subtitle_ai_frame,
             textvariable=self.subtitle_src_lang,
             values=["自动检测(auto)", "阿拉伯语(ar)", "土耳其语(tr)", "中文(zh)"],
             width=18,
             state="readonly",
         ).grid(row=1, column=1, sticky="ew", padx=4, pady=5)
 
-        self._lab(frame, "目标语言(翻译):", row=2)
+        self._lab(self._subtitle_ai_frame, "目标语言(翻译):", row=2)
         ttk.Combobox(
-            frame,
+            self._subtitle_ai_frame,
             textvariable=self.subtitle_tgt_lang,
             values=["不翻译(none)", "中文(zh)", "阿拉伯语(ar)", "土耳其语(tr)"],
             width=18,
             state="readonly",
         ).grid(row=2, column=1, sticky="ew", padx=4, pady=5)
 
-        self._lab(frame, "Whisper模型:", row=3)
+        self._lab(self._subtitle_ai_frame, "输出模式:", row=3)
         ttk.Combobox(
-            frame,
-            textvariable=self.subtitle_model_size,
-            values=["tiny", "base", "small", "turbo", "medium", "large-v3"],
+            self._subtitle_ai_frame,
+            textvariable=self.subtitle_output_mode,
+            values=["仅原语言", "仅翻译", "双语并存(单文件)", "双文件输出"],
             width=18,
             state="readonly",
         ).grid(row=3, column=1, sticky="ew", padx=4, pady=5)
 
-        # 烧录开关
-        ttk.Label(frame, text=" ").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=5)
-        ttk.Checkbutton(
-            frame,
-            text="烧录字幕到视频",
-            variable=self.subtitle_burn_in,
-        ).grid(row=4, column=1, sticky="w", padx=4, pady=5)
+        self._lab(self._subtitle_ai_frame, "Whisper模型:", row=4)
+        ttk.Combobox(
+            self._subtitle_ai_frame,
+            textvariable=self.subtitle_model_size,
+            values=["tiny", "base", "small", "turbo", "medium", "large-v3"],
+            width=18,
+            state="readonly",
+        ).grid(row=4, column=1, sticky="ew", padx=4, pady=5)
 
-        self._lab(frame, "字体(阿语必选):", row=5)
-        ttk.Entry(frame, textvariable=self.subtitle_font_name, width=24).grid(
-            row=5, column=1, sticky="ew", padx=4, pady=5,
-        )
+        self._subtitle_burn_frame = ttk.Frame(frame)
+        self._subtitle_burn_frame.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self._subtitle_burn_frame.columnconfigure(1, weight=1)
 
         ttk.Label(
-            frame,
-            text="提示：需安装 faster-whisper；翻译需 googletrans。烧录阿语建议用 Arial Unicode MS 等支持阿语字体。",
+            self._subtitle_burn_frame,
+            text="剪映/PR 里做好字幕（含双语排版）→ 导出 SRT → 本工具批量烧录。"
+            "全程本地 FFmpeg，不联网、不识别。",
             foreground=WB_MUTED,
             wraplength=420,
             justify="left",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
+        self._lab(self._subtitle_burn_frame, "SRT 来源:", row=1)
+        srt_src_combo = ttk.Combobox(
+            self._subtitle_burn_frame,
+            textvariable=self.subtitle_srt_source,
+            values=[
+                "与视频同目录（同名 .srt）",
+                "指定字幕文件夹（同名匹配）",
+                "固定 SRT（应用到所有视频）",
+            ],
+            width=26,
+            state="readonly",
+        )
+        srt_src_combo.grid(row=1, column=1, sticky="ew", padx=4, pady=5)
+        srt_src_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_subtitle_srt_source_changed())
+
+        self._subtitle_srt_folder_row = ttk.Frame(self._subtitle_burn_frame)
+        self._subtitle_srt_folder_row.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self._subtitle_srt_folder_row.columnconfigure(1, weight=1)
+        ttk.Label(self._subtitle_srt_folder_row, text="字幕文件夹:").grid(
+            row=0, column=0, sticky="w", padx=(8, 8), pady=5,
+        )
+        ttk.Entry(self._subtitle_srt_folder_row, textvariable=self.subtitle_srt_folder).grid(
+            row=0, column=1, sticky="ew", padx=4, pady=5,
+        )
+        make_button(
+            self._subtitle_srt_folder_row,
+            "浏览",
+            lambda: self._pick_dir(self.subtitle_srt_folder, "选择字幕文件夹"),
+            kind="outline",
+            width=6,
+        ).grid(row=0, column=2, padx=4, pady=5)
+
+        self._subtitle_fixed_srt_row = ttk.Frame(self._subtitle_burn_frame)
+        self._subtitle_fixed_srt_row.grid(row=2, column=0, columnspan=3, sticky="ew")
+        self._subtitle_fixed_srt_row.columnconfigure(1, weight=1)
+        ttk.Label(self._subtitle_fixed_srt_row, text="固定 SRT 文件:").grid(
+            row=0, column=0, sticky="w", padx=(8, 8), pady=5,
+        )
+        ttk.Entry(self._subtitle_fixed_srt_row, textvariable=self.subtitle_fixed_srt).grid(
+            row=0, column=1, sticky="ew", padx=4, pady=5,
+        )
+        make_button(
+            self._subtitle_fixed_srt_row,
+            "浏览",
+            self._pick_subtitle_fixed_srt,
+            kind="outline",
+            width=6,
+        ).grid(row=0, column=2, padx=4, pady=5)
+        ttk.Label(
+            self._subtitle_fixed_srt_row,
+            text="本批所有视频均烧录此 SRT，不再按文件名匹配",
+            foreground=WB_MUTED,
+            font=("", 8),
+        ).grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
+
+        self._lab(self._subtitle_burn_frame, "烧录字体:", row=3)
+        font_row = ttk.Frame(self._subtitle_burn_frame)
+        font_row.grid(row=3, column=1, sticky="ew", padx=4, pady=5)
+        font_row.columnconfigure(0, weight=1)
+        from modules.subtitle_engine import list_subtitle_font_choices
+
+        self._subtitle_font_combo = ttk.Combobox(
+            font_row,
+            textvariable=self.subtitle_font_name,
+            values=list_subtitle_font_choices(self.root),
+            width=20,
+        )
+        self._subtitle_font_combo.grid(row=0, column=0, sticky="ew")
+        self._subtitle_font_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_subtitle_font_hint())
+        self._subtitle_font_combo.bind("<KeyRelease>", lambda _e: self._refresh_subtitle_font_hint())
+        self.subtitle_font_name.trace_add("write", lambda *_: self._refresh_subtitle_font_hint())
+        make_button(
+            font_row, "推荐", self._apply_subtitle_font_suggestion, kind="outline", width=5,
+        ).grid(row=0, column=1, padx=(4, 0))
+        make_button(
+            font_row, "检测", self._refresh_subtitle_font_hint, kind="outline", width=5,
+        ).grid(row=0, column=2, padx=(4, 0))
+        make_button(
+            font_row, "刷新", self._refresh_subtitle_font_list, kind="outline", width=5,
+        ).grid(row=0, column=3, padx=(4, 0))
+        ttk.Label(
+            self._subtitle_burn_frame,
+            textvariable=self.subtitle_font_status,
+            foreground=WB_MUTED,
+            font=("", 8),
+        ).grid(row=4, column=1, sticky="w", padx=4)
+
+        ttk.Label(
+            self._subtitle_burn_frame,
+            text="字体预览（模拟硬字幕，黑底白字）:",
+            foreground=WB_MUTED,
+            font=("", 8),
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 2))
+
+        preview_bg = "#121212"
+        self._subtitle_font_preview_box = tk.Frame(
+            self._subtitle_burn_frame,
+            bg=preview_bg,
+            highlightthickness=1,
+            highlightbackground="#333333",
+        )
+        self._subtitle_font_preview_box.grid(
+            row=6, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 4),
+        )
+        self._subtitle_font_preview_note = tk.Label(
+            self._subtitle_font_preview_box,
+            text="",
+            bg=preview_bg,
+            fg="#888888",
+            font=("Microsoft YaHei", 8),
+            anchor="w",
+        )
+        self._subtitle_font_preview_note.pack(fill=X, padx=10, pady=(8, 2))
+        self._subtitle_font_preview_line1 = tk.Label(
+            self._subtitle_font_preview_box,
+            text="Sohbet etmek için hala para mı acıyorsun?",
+            bg=preview_bg,
+            fg="#FFFFFF",
+            font=("Microsoft YaHei", 15),
+            anchor="center",
+            justify="center",
+            wraplength=380,
+        )
+        self._subtitle_font_preview_line1.pack(fill=X, padx=10, pady=(2, 0))
+        self._subtitle_font_preview_line2 = tk.Label(
+            self._subtitle_font_preview_box,
+            text="还在为了聊天心疼钱吗？",
+            bg=preview_bg,
+            fg="#FFFFFF",
+            font=("Microsoft YaHei", 13),
+            anchor="center",
+            justify="center",
+            wraplength=380,
+        )
+        self._subtitle_font_preview_line2.pack(fill=X, padx=10, pady=(0, 10))
+
+        self._subtitle_hint = ttk.Label(
+            frame,
+            text="",
+            foreground=WB_MUTED,
+            wraplength=420,
+            justify="left",
+        )
+        self._subtitle_hint.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
+
+        self.root.after_idle(self._on_subtitle_work_mode_changed)
+
+    def _on_subtitle_work_mode_changed(self) -> None:
+        mode = (self.subtitle_work_mode.get() or "").strip()
+        if "外部" in mode:
+            self._subtitle_ai_frame.grid_remove()
+            self._subtitle_burn_frame.grid()
+            self._on_subtitle_srt_source_changed()
+            self._refresh_subtitle_font_hint()
+            self._subtitle_hint.config(
+                text="同名匹配：foo.mp4 → foo.srt；固定模式：选一个 SRT 烧录到本批全部视频。"
+                "烧录会重新编码，耗时明显增加。",
+            )
+        else:
+            self._subtitle_burn_frame.grid_remove()
+            self._subtitle_ai_frame.grid()
+            self._subtitle_hint.config(
+                text="AI 模式需 Faster-Whisper（scripts\\setup_subtitle_env.bat）。"
+                "翻译依赖 Google 网络，不稳定时请在剪映/PR 做好字幕后切「外部 SRT 烧录」。",
+            )
+        try:
+            self._refresh_pipeline_bar()
+        except Exception:
+            pass
+
+    def _on_subtitle_srt_source_changed(self) -> None:
+        src = (self.subtitle_srt_source.get() or "").strip()
+        if src.startswith("指定"):
+            self._subtitle_srt_folder_row.grid()
+            self._subtitle_fixed_srt_row.grid_remove()
+        elif src.startswith("固定"):
+            self._subtitle_fixed_srt_row.grid()
+            self._subtitle_srt_folder_row.grid_remove()
+        else:
+            self._subtitle_srt_folder_row.grid_remove()
+            self._subtitle_fixed_srt_row.grid_remove()
+
+    def _pick_subtitle_fixed_srt(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="选择固定 SRT 文件（将应用到所有视频）",
+            filetypes=[("SRT 字幕", "*.srt"), ("所有文件", "*.*")],
+        )
+        if path:
+            self.subtitle_fixed_srt.set(path)
+
+    def _subtitle_config_dict(self) -> dict:
+        if not hasattr(self, "subtitle_work_mode"):
+            return {}
+        return {
+            "subtitle_work_mode": self.subtitle_work_mode.get(),
+            "subtitle_src_lang": self.subtitle_src_lang.get(),
+            "subtitle_tgt_lang": self.subtitle_tgt_lang.get(),
+            "subtitle_output_mode": self.subtitle_output_mode.get(),
+            "subtitle_model_size": self.subtitle_model_size.get(),
+            "subtitle_srt_source": self.subtitle_srt_source.get(),
+            "subtitle_srt_folder": self.subtitle_srt_folder.get(),
+            "subtitle_fixed_srt": self.subtitle_fixed_srt.get(),
+            "subtitle_font_name": self.subtitle_font_name.get(),
+        }
+
+    def _subtitle_field_defaults(self) -> dict[str, str]:
+        return {
+            "subtitle_work_mode": "AI 识别/翻译 → SRT",
+            "subtitle_src_lang": "自动检测(auto)",
+            "subtitle_tgt_lang": "中文(zh)",
+            "subtitle_output_mode": "双语并存(单文件)",
+            "subtitle_model_size": "base",
+            "subtitle_srt_source": "与视频同目录（同名 .srt）",
+            "subtitle_srt_folder": "",
+            "subtitle_fixed_srt": "",
+            "subtitle_font_name": "Arial Unicode MS",
+        }
+
+    def _apply_subtitle_config(self, cfg: dict) -> None:
+        defaults = self._subtitle_field_defaults()
+        for key, default in defaults.items():
+            attr = key
+            var = getattr(self, attr, None)
+            if var is None:
+                continue
+            try:
+                val = cfg.get(key, default) if isinstance(cfg, dict) else default
+                var.set("" if val is None else str(val))
+            except Exception:
+                pass
+        try:
+            self._on_subtitle_srt_source_changed()
+        except Exception:
+            pass
+
+    def _current_config_dict(self) -> dict:  # type: ignore[override]
+        cfg = super()._current_config_dict()
+        cfg.update(self._subtitle_config_dict())
+        return cfg
+
+    def _apply_config_dict(self, cfg: dict, *, io_mode: str = "template") -> None:  # type: ignore[override]
+        super()._apply_config_dict(cfg, io_mode=io_mode)
+        if isinstance(cfg, dict):
+            self._apply_subtitle_config(cfg)
+
+    def _apply_subtitle_font_suggestion(self) -> None:
+        from modules.subtitle_engine import suggest_subtitle_font
+
+        self.subtitle_font_name.set(suggest_subtitle_font())
+        self._refresh_subtitle_font_hint()
+
+    def _refresh_subtitle_font_list(self) -> None:
+        from modules.subtitle_engine import clear_subtitle_font_cache, list_subtitle_font_choices
+
+        clear_subtitle_font_cache()
+        combo = getattr(self, "_subtitle_font_combo", None)
+        if combo is not None:
+            fonts = list_subtitle_font_choices(self.root, refresh=True)
+            combo["values"] = fonts
+            try:
+                self.log(f"字幕 · 已扫描本机字体 {len(fonts)} 个")
+            except Exception:
+                pass
+        self._refresh_subtitle_font_hint()
+
+    def _refresh_subtitle_font_hint(self) -> None:
+        from modules.subtitle_engine import list_subtitle_font_choices, validate_subtitle_font
+
+        ok, msg = validate_subtitle_font(self.subtitle_font_name.get(), self.root)
+        if ok:
+            n = len(list_subtitle_font_choices(self.root))
+            msg = f"{msg} · 下拉共 {n} 个字体"
+        self.subtitle_font_status.set(msg if ok else f"⚠ {msg}")
+        self._refresh_subtitle_font_preview(installed=ok)
+
+    def _refresh_subtitle_font_preview(self, *, installed: bool = True) -> None:
+        """黑底白字预览当前烧录字体（双语两行，接近成片效果）。"""
+        line1 = getattr(self, "_subtitle_font_preview_line1", None)
+        line2 = getattr(self, "_subtitle_font_preview_line2", None)
+        note = getattr(self, "_subtitle_font_preview_note", None)
+        if line1 is None or line2 is None:
+            return
+
+        import tkinter.font as tkfont
+
+        requested = (self.subtitle_font_name.get() or "").strip() or "Arial"
+        families = list(tkfont.families(self.root))
+        family = requested
+        exact = family in families
+        if not exact:
+            lower_map = {f.lower(): f for f in families}
+            hit = lower_map.get(requested.lower())
+            if hit:
+                family = hit
+                exact = True
+
+        def _make_font(size: int) -> tkfont.Font:
+            try:
+                return tkfont.Font(family=family, size=size)
+            except tk.TclError:
+                return tkfont.Font(size=size)
+
+        line1.config(font=_make_font(15))
+        line2.config(font=_make_font(13))
+
+        if note is not None:
+            if exact or installed:
+                note.config(
+                    text=f"当前字体：{family} · 上行原文 / 下行译文（预览仅供参考，成片由 FFmpeg 渲染）",
+                    fg="#888888",
+                )
+            else:
+                note.config(
+                    text=f"⚠ 未找到「{requested}」，预览为系统默认字体；烧录可能缺字",
+                    fg="#E6A23C",
+                )
 
     def build_ui(self):
-        paned = ttk.Panedwindow(self.main_frame, orient=tk.HORIZONTAL)
-        paned.pack(fill=BOTH, expand=True, padx=16, pady=16)
-        self._paned = paned
-        left = ttk.Frame(paned, width=280)
-        center = ttk.Frame(paned)
-        right = ttk.Frame(paned, width=280)
-        paned.add(left, weight=1)
-        paned.add(center, weight=2)
-        paned.add(right, weight=1)
-        self._build_center_panel(center)
-        self._build_left_panel(left)
-        self._build_right_panel(right)
+        pal = workbench_palette()
+        self._layout = ThreeColumnLayout(self.main_frame, palette=pal)
+        self._build_center_panel(self._layout.mid)
+        self._build_left_panel(self._layout.left)
+        self._build_right_panel(self._layout.right)
+        self._build_right_actions(self._layout.right_actions)
         self._embed_naming_tool()
         self._embed_fission_panel()
         self._sync_feature_panels()
         self._refresh_footer_status()
-        self._refresh_asset_tree()
+        self.root.after_idle(self._refresh_asset_tree)
 
 
 def main():
-    ui_theme = "flatly"
+    from modules import habi_memory
+
+    app_skin = str(habi_memory.prefs().get("default_theme") or "简约工作台").strip()
     v21_cfg = config_path("video_batch_config_v21.json")
     try:
         if os.path.isfile(v21_cfg):
             with open(v21_cfg, "r", encoding="utf-8") as f:
-                ui_theme = str(json.load(f).get("ui_theme", "flatly"))
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                app_skin = str(raw.get("app_skin") or app_skin).strip()
     except Exception:
-        ui_theme = "flatly"
+        pass
 
+    use_none = is_none_skin(app_skin)
+
+    root = tk.Tk()
+    root.title(APP_TITLE)
+    root._ui_theme = UI_THEME_NONE if use_none else app_skin  # noqa: SLF001
+
+    style = ttk.Style()
     try:
-        import ttkbootstrap as ttkb
-
-        root = ttkb.Window(
-            title=APP_TITLE,
-            themename=ui_theme if ui_theme != UI_THEME_NONE else "flatly",
-        )
-        root._ui_theme = ui_theme  # noqa: SLF001
-    except Exception:
-        root = tk.Tk()
-        root.title(APP_TITLE)
-        root._ui_theme = ui_theme  # noqa: SLF001
+        style.theme_use("clam")
+    except TclError:
+        pass
 
     apply_workbench_root(root)
+    apply_safe_ttk_base(root)
+
+    try:
+        root.geometry("1450x850")
+        root.minsize(1280, 760)
+    except TclError:
+        pass
+
     app = VideoBatchToolV24(root)
+    try:
+        if use_none:
+            app._apply_app_skin("无主题（经典皮肤）")
+        elif app_skin in APP_SKIN_LABELS:
+            app._apply_app_skin(app_skin)
+        else:
+            app._apply_app_skin("简约工作台")
+    except Exception as exc:
+        print(f"主题加载失败: {exc}")
+
     try:
         root.state("zoomed")
     except TclError:
@@ -2559,4 +3902,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        try:
+            from tkinter import messagebox
+            messagebox.showerror("启动失败", f"{exc}\n\n请用 启动V24工作台.bat 或 Python 3.13 启动")
+        except Exception:
+            pass
+        raise

@@ -58,8 +58,10 @@ from core.overlay_processor import (
     combine_endcard_filters,
     compute_endcard_timing,
     probe_has_audio,
+    probe_media_duration,
     probe_video_geometry,
 )
+from core.batch_control import BatchRunController
 from core.watermark import apply_mov_watermark
 from ui.timeline_canvas import TimelineCanvas
 
@@ -89,7 +91,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         _str("ratio_blur_strength", "20")
 
         _bool("enhance_enable")
-        _str("enhance_mode", "锐化降噪")  # 锐化降噪 | 轻度放大
+        _str("enhance_mode", "锐化降噪")  # 已废弃，保留配置兼容
 
         _bool("enable_mov_watermark")
         _bool("mov_color_protect")
@@ -160,8 +162,10 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self.failed_files: list[str] = []
         self._log_pane_height = LOG_PANE_DEFAULT
         self._ensure_core_config_vars()
+        self._batch_ctl = BatchRunController(self)
         super().__init__(root)
         self.root.title(APP_TITLE)
+        self._bind_batch_hotkeys()
         try:
             if hasattr(self, "main_title_label"):
                 self.main_title_label.config(text=f"🎬  {APP_TITLE}")
@@ -170,9 +174,31 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
     # V21-stable: FFmpeg 失败时打印完整命令，便于定位批处理崩溃
     def ffmpeg(self, cmd):  # type: ignore[override]
-        ok, err = v20.run_ffmpeg(cmd, raise_on_fail=False)
+        poll_cb = None
+        progress_cb = None
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is not None and ctl.active:
+            poll_cb = ctl.poll_ffmpeg
+            last_log = [0.0]
+
+            def _progress(tag: str) -> None:
+                import time as _time
+
+                now = _time.time()
+                if now - last_log[0] < 3.0:
+                    return
+                last_log[0] = now
+                try:
+                    self.log(f"  编码中 … {tag.replace('time=', '')}")
+                except Exception:
+                    pass
+
+            progress_cb = _progress
+        ok, err = v20.run_ffmpeg(cmd, raise_on_fail=False, poll_cb=poll_cb, progress_cb=progress_cb)
         if ok:
             return
+        if err and "用户" in str(err) and "停止" in str(err):
+            raise RuntimeError(str(err))
         try:
             s = " ".join(str(x) for x in cmd)
             if len(s) > 1600:
@@ -182,6 +208,41 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             pass
         from core.overlay_engine import user_diagnosis_from_stderr
         raise RuntimeError(user_diagnosis_from_stderr(err or "FFmpeg failed"))
+
+    def _bind_batch_hotkeys(self) -> None:
+        self.root.bind_all("<KeyPress-space>", self._on_batch_space_key, add="+")
+        self.root.bind_all("<KeyPress-Escape>", self._on_batch_escape_key, add="+")
+
+    @staticmethod
+    def _event_in_text_widget(event) -> bool:
+        try:
+            w = event.widget
+            cls = w.winfo_class()
+            if cls in ("Entry", "TEntry", "Text", "Spinbox", "TSpinbox"):
+                return True
+            if isinstance(w, (Entry, Text)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _on_batch_space_key(self, event) -> str | None:
+        if self._event_in_text_widget(event):
+            return None
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is None or not ctl.active:
+            return None
+        ctl.toggle_pause()
+        return "break"
+
+    def _on_batch_escape_key(self, event) -> str | None:
+        if self._event_in_text_widget(event):
+            return None
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is None or not ctl.active:
+            return None
+        ctl.request_stop()
+        return "break"
 
     def setup_style(self):
         super().setup_style()
@@ -312,7 +373,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         return row + 1
 
     def build_global_actions(self, row):
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
 
         card, _hdr, content = self._module_card(
             self.main_frame, "批处理操作", "🚀", "global",
@@ -474,50 +535,8 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             row=2, column=1, sticky="ew", padx=4, pady=5)
         ttk.Label(frame, text="(5-50)").grid(row=2, column=2, sticky="w", padx=4, pady=5)
 
-    def build_enhance_section(self, row, col):
-        """轻量画质增强：锐化+降噪；不能凭空补细节。"""
-        self.enhance_enable = BooleanVar(value=False)
-        card, _hdr, frame = self._module_card(
-            self.main_frame, "画质增强（轻量）", "✨", "enhance", enable_var=self.enhance_enable,
-        )
-        self._grid_card(card, row, col)
-        self._configure_form_grid(frame)
-        self._lab(frame, "模式:", row=1)
-        self.enhance_mode = StringVar(value="锐化降噪")
-        ttk.Combobox(
-            frame, textvariable=self.enhance_mode, width=12, state="readonly",
-            values=["锐化降噪", "轻度放大"],
-        ).grid(row=1, column=1, sticky="ew", padx=4, pady=5)
-        ttk.Label(
-            frame,
-            text="原片糊只能略改善观感，无法真正「变高清」；重糊请换更好源片",
-            foreground="gray", wraplength=360, font=("", 8),
-        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 4))
-
-    def _enhance_quality(self, inp: str, out: str, *, mode: str = "锐化降噪") -> None:
-        """FFmpeg 轻量增强：降噪+锐化；可选把较短边抬到约 1080。"""
-        mode = (mode or "锐化降噪").strip()
-        if mode == "轻度放大":
-            vf = (
-                "scale=w='if(lt(iw,ih),1080,-2)':h='if(lt(iw,ih),-2,1080)':"
-                "flags=lanczos,"
-                "hqdn3d=1.2:1.2:4:4,unsharp=5:5:0.6:5:5:0.0"
-            )
-        else:
-            vf = "hqdn3d=1.5:1.5:6:6,unsharp=5:5:0.8:5:5:0.0"
-        cmd = [
-            v20.FFMPEG_PATH, "-y", "-i", inp,
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "copy",
-            out,
-        ]
-        ok, err = v20.run_ffmpeg(cmd, raise_on_fail=False)
-        if not ok or not os.path.isfile(out):
-            raise RuntimeError(f"画质增强失败: {err or '无输出'}")
-
     def build_mov_wm_section(self, row, col):
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
 
         self.enable_mov_watermark = BooleanVar(value=False)
         self.mov_color_protect = BooleanVar(value=False)
@@ -570,14 +589,14 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         ttk.Entry(frame, textvariable=self.mov_watermark_duration, width=10).grid(
             row=5, column=1, sticky="ew", padx=4, pady=5)
 
-        ttk.Checkbutton(
+        make_checkbutton(
             frame,
             text="颜色保护（去发灰/发黑；略慢但仍是秒级）",
             variable=self.mov_color_protect,
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
     def build_audio_replace_section(self, row, col):
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
 
         # 兼容旧字段：保留音频变量，但默认关闭且不展示替换音频 UI。
         self.audio_enable = BooleanVar(value=False)
@@ -772,7 +791,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             pass
 
     def build_log_section(self, row=None):
-        from modules.ui_skin import make_button, setup_log_tags
+        from modules.ui_skin import make_button, make_checkbutton, setup_log_tags
 
         c = self._card_colors
         accent = self.module_colors.get("log", "#9CA3AF")
@@ -867,7 +886,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             result["choice"] = mode
             dlg.destroy()
 
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
         make_button(btn_row, "跳过已有文件", lambda: pick("skip"), kind="outline").pack(side=LEFT, padx=4)
         make_button(btn_row, "覆盖", lambda: pick("overwrite"), kind="warning").pack(side=LEFT, padx=4)
         make_button(btn_row, "自动重命名", lambda: pick("rename"), kind="info").pack(side=LEFT, padx=4)
@@ -957,7 +976,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     # ---------- 批处理步骤（顺序可被 V22 布局覆盖）----------
 
     _BATCH_PIPELINE_DEFAULT: tuple[str, ...] = (
-        "cut", "enhance", "ratio", "mov_wm", "png_wm", "layer", "ending", "overlay",
+        "cut", "ratio", "mov_wm", "png_wm", "layer", "ending", "overlay",
     )
 
     def _batch_pipeline_order(self) -> list[str]:
@@ -967,7 +986,6 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     def _batch_step_enabled(self, key: str) -> bool:
         mapping = {
             "cut": "cut_enable",
-            "enhance": "enhance_enable",
             "ratio": "ratio_enable",
             "mov_wm": "enable_mov_watermark",
             "png_wm": "png_wm_enable",
@@ -982,7 +1000,6 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     def _batch_step_label(key: str) -> str:
         return {
             "cut": "视频裁切",
-            "enhance": "画质增强",
             "ratio": "比例适配",
             "mov_wm": "动态水印",
             "png_wm": "静态水印",
@@ -1013,17 +1030,6 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             if current != inp:
                 temps.append(current)
             self.log("  裁切完成")
-            return tmp
-
-        if key == "enhance":
-            tmp = self.get_temp(out, "enh")
-            mode = ""
-            if hasattr(self, "enhance_mode"):
-                mode = (self.enhance_mode.get() or "锐化降噪").strip()
-            self._enhance_quality(current, tmp, mode=mode)
-            if current != inp:
-                temps.append(current)
-            self.log(f"  画质增强完成: {mode or '锐化降噪'}")
             return tmp
 
         if key == "ratio":
@@ -1065,12 +1071,16 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             if not wp or not os.path.exists(wp):
                 raise RuntimeError("静态水印文件未设置或不存在，请先选好文件再处理")
             tmp = self.get_temp(out, "pngwm")
-            sp = self._png_overlay_scale_percent()
-            pos = self.png_wm_position.get() or "居中"
+            mode = (self.png_wm_mode.get() or "fullscreen").strip()
             self.apply_overlay_sticker(current, wp, tmp)
             if current != inp:
                 temps.append(current)
-            self.log(f"  静态水印完成 ({pos}, 宽{sp:.0f}%)")
+            if mode == "fullscreen":
+                self.log("  静态水印完成（全屏贴合）")
+            else:
+                sp = self._png_overlay_scale_percent()
+                pos = self.png_wm_position.get() or "居中"
+                self.log(f"  静态水印完成 ({pos}, 宽{sp:.0f}%)")
             return tmp
 
         if key == "layer":
@@ -1162,7 +1172,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             pass
 
     def build_layer_section(self, row, col):
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
 
         self.layer_enable = BooleanVar(value=False)
         self.layer_type = StringVar(value="浮层落版")
@@ -1237,7 +1247,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._endcard_timeline.on_lead_changed = on_lead_changed
 
         self.overlay_keep_audio = BooleanVar(value=False)
-        ttk.Checkbutton(
+        make_checkbutton(
             self._panel_endcard, text="保留落版音频（重叠段与主音混合；延长段自动带落版音）",
             variable=self.overlay_keep_audio,
         ).pack(anchor="w", pady=(2, 0))
@@ -1293,7 +1303,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
     def build_ending_section(self, row, col):
         """保留拼接落版（拼接到主视频末尾）。"""
-        from modules.ui_skin import make_button
+        from modules.ui_skin import make_button, make_checkbutton
 
         self.ending_enable = BooleanVar(value=False)
         if not hasattr(self, "ending_keep_audio"):
@@ -1310,7 +1320,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         make_button(frame, "浏览", self.select_ending, kind="outline", width=7).grid(
             row=1, column=2, padx=4, pady=5, sticky="ew")
 
-        ttk.Checkbutton(frame, text="保留落版音频", variable=self.ending_keep_audio).grid(
+        make_checkbutton(frame, text="保留落版音频", variable=self.ending_keep_audio).grid(
             row=2, column=0, columnspan=3, sticky="w", padx=4, pady=4)
 
         trim_row = ttk.Frame(frame)
@@ -1391,89 +1401,74 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         except OSError:
             pass
 
+    def _v21_extra_field_specs(self) -> tuple[tuple[str, str, Any], ...]:
+        """(attr_name, cfg_key, default) — 加载模板时缺省键也重置，避免方案之间串台。"""
+        return (
+            ("cut_range_mode", "cut_range_mode", "固定时段"),
+            ("cut_tail_sec", "cut_tail_sec", "5"),
+            ("overlay_custom_x", "overlay_custom_x", "0"),
+            ("overlay_custom_y", "overlay_custom_y", "0"),
+            ("enhance_enable", "enhance_enable", False),
+            ("enhance_mode", "enhance_mode", "锐化降噪"),
+            ("png_wm_enable", "png_wm_enable", False),
+            ("png_wm_path", "png_wm_path", ""),
+            ("png_wm_mode", "png_wm_mode", "fullscreen"),
+            ("png_wm_position", "png_wm_position", "居中"),
+            ("png_wm_x", "png_wm_x", "0"),
+            ("png_wm_y", "png_wm_y", "0"),
+            ("png_wm_w", "png_wm_w", "0"),
+            ("png_wm_h", "png_wm_h", "0"),
+            ("png_wm_time_mode", "png_wm_time_mode", "全程"),
+            ("png_wm_time_start", "png_wm_time_start", "0"),
+            ("png_wm_time_end", "png_wm_time_end", "5"),
+            ("mov_color_protect", "mov_color_protect", False),
+            ("ending_concat_trim", "ending_concat_trim", "0"),
+            ("ending_trim", "ending_trim", "1.0"),
+            ("overlay_keep_audio", "overlay_keep_audio", False),
+        )
+
     def _v21_extra_into_dict(self) -> dict:
         """V21 扩展字段快照（须随裂变分支 / 模板一起 round-trip）。"""
         out: dict = {}
-        pairs = (
-            ("cut_range_mode", "cut_range_mode"),
-            ("cut_tail_sec", "cut_tail_sec"),
-            ("overlay_custom_x", "overlay_custom_x"),
-            ("overlay_custom_y", "overlay_custom_y"),
-            ("enhance_enable", "enhance_enable"),
-            ("enhance_mode", "enhance_mode"),
-            ("png_wm_enable", "png_wm_enable"),
-            ("png_wm_path", "png_wm_path"),
-            ("png_wm_mode", "png_wm_mode"),
-            ("png_wm_position", "png_wm_position"),
-            ("png_wm_x", "png_wm_x"),
-            ("png_wm_y", "png_wm_y"),
-            ("png_wm_w", "png_wm_w"),
-            ("png_wm_h", "png_wm_h"),
-            ("png_wm_time_mode", "png_wm_time_mode"),
-            ("png_wm_time_start", "png_wm_time_start"),
-            ("png_wm_time_end", "png_wm_time_end"),
-            ("mov_color_protect", "mov_color_protect"),
-            ("ending_concat_trim", "ending_concat_trim"),
-            ("ending_trim", "ending_trim"),
-            ("overlay_keep_audio", "overlay_keep_audio"),
-        )
-        for attr, key in pairs:
+        for attr, key, default in self._v21_extra_field_specs():
             var = getattr(self, attr, None)
             if var is None:
                 continue
             try:
                 out[key] = var.get()
             except Exception:
-                pass
+                out[key] = default
         return out
 
     def _apply_v21_extra_fields(self, cfg: dict) -> None:
         if not isinstance(cfg, dict):
-            return
+            cfg = {}
         try:
-            if cfg.get("cut_range_mode") and hasattr(self, "cut_range_mode"):
-                self.cut_range_mode.set(str(cfg["cut_range_mode"]))
-            if cfg.get("cut_tail_sec") is not None and hasattr(self, "cut_tail_sec"):
-                self.cut_tail_sec.set(str(cfg["cut_tail_sec"]))
-            if hasattr(self, "_on_cut_range_mode_change"):
-                self._on_cut_range_mode_change()
-            if "enhance_enable" in cfg and hasattr(self, "enhance_enable"):
-                self.enhance_enable.set(bool(cfg.get("enhance_enable")))
-            if cfg.get("enhance_mode") and hasattr(self, "enhance_mode"):
-                self.enhance_mode.set(str(cfg["enhance_mode"]))
-            if cfg.get("overlay_custom_x") is not None and hasattr(self, "overlay_custom_x"):
-                self.overlay_custom_x.set(str(cfg["overlay_custom_x"]))
-            if cfg.get("overlay_custom_y") is not None and hasattr(self, "overlay_custom_y"):
-                self.overlay_custom_y.set(str(cfg["overlay_custom_y"]))
-            if "png_wm_enable" in cfg and hasattr(self, "png_wm_enable"):
-                self.png_wm_enable.set(bool(cfg["png_wm_enable"]))
-            if cfg.get("png_wm_path") is not None and hasattr(self, "png_wm_path"):
-                self.png_wm_path.set(str(cfg.get("png_wm_path") or ""))
-            if cfg.get("png_wm_mode") and hasattr(self, "png_wm_mode"):
-                self.png_wm_mode.set(str(cfg["png_wm_mode"]))
-            elif hasattr(self, "png_wm_mode") and any(
+            for attr, key, default in self._v21_extra_field_specs():
+                var = getattr(self, attr, None)
+                if var is None:
+                    continue
+                try:
+                    if isinstance(default, bool):
+                        var.set(bool(cfg.get(key, default)))
+                    else:
+                        val = cfg.get(key, default)
+                        var.set("" if val is None else str(val))
+                except Exception:
+                    pass
+            if "png_wm_mode" not in cfg and hasattr(self, "png_wm_mode") and any(
                 cfg.get(k) not in (None, "", 0, "0") for k in ("png_wm_x", "png_wm_y", "png_wm_w", "png_wm_h")
             ):
                 self.png_wm_mode.set("custom")
-            if cfg.get("png_wm_position") and hasattr(self, "png_wm_position"):
-                self.png_wm_position.set(str(cfg["png_wm_position"]))
-            for k in ("png_wm_x", "png_wm_y", "png_wm_w", "png_wm_h", "png_wm_time_start", "png_wm_time_end"):
-                if cfg.get(k) is not None and hasattr(self, k):
-                    getattr(self, k).set(str(cfg[k]))
-            if cfg.get("png_wm_time_mode") and hasattr(self, "png_wm_time_mode"):
-                self.png_wm_time_mode.set(str(cfg["png_wm_time_mode"]))
-            if "mov_color_protect" in cfg and hasattr(self, "mov_color_protect"):
-                self.mov_color_protect.set(bool(cfg["mov_color_protect"]))
-            if cfg.get("ending_concat_trim") is not None and hasattr(self, "ending_concat_trim"):
-                self.ending_concat_trim.set(str(cfg["ending_concat_trim"]))
-            if cfg.get("ending_trim") is not None and hasattr(self, "ending_trim"):
-                self.ending_trim.set(str(cfg.get("ending_trim") or "1.0"))
-            if "overlay_keep_audio" in cfg and hasattr(self, "overlay_keep_audio"):
-                self.overlay_keep_audio.set(bool(cfg["overlay_keep_audio"]))
-            if "layer_enable" in cfg and hasattr(self, "layer_enable"):
-                self.layer_enable.set(bool(cfg.get("layer_enable")))
-            elif "logo_enable" in cfg and hasattr(self, "layer_enable"):
-                self.layer_enable.set(bool(cfg.get("logo_enable")))
+            if hasattr(self, "layer_enable"):
+                if "layer_enable" in cfg:
+                    self.layer_enable.set(bool(cfg.get("layer_enable")))
+                elif "logo_enable" in cfg:
+                    self.layer_enable.set(bool(cfg.get("logo_enable")))
+                else:
+                    self.layer_enable.set(False)
+            if hasattr(self, "_on_cut_range_mode_change"):
+                self._on_cut_range_mode_change()
         except Exception:
             pass
         try:
@@ -1606,11 +1601,15 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         return [*args, "-i", path]
 
     def apply_overlay_endcard(self, inp: str, overlay_path: str, out: str) -> None:
-        main_dur = float(self.get_duration(inp) or 0)
+        main_dur = float(probe_media_duration(v20.FFPROBE_PATH, inp) or 0)
+        if main_dur <= 0:
+            main_dur = float(self.get_duration(inp) or 0)
         if main_dur <= 0:
             main_dur = float(v20.resolve_duration(v20.FFPROBE_PATH, Path(inp), 0))
         is_image = os.path.splitext(overlay_path)[1].lower() in _IMAGE_EXTS
-        logo_dur = float(self.get_duration(overlay_path) or 0)
+        logo_dur = float(probe_media_duration(v20.FFPROBE_PATH, overlay_path) or 0)
+        if logo_dur <= 0:
+            logo_dur = float(self.get_duration(overlay_path) or 0)
         if logo_dur <= 0 and not is_image:
             logo_dur = float(v20.resolve_duration(v20.FFPROBE_PATH, Path(overlay_path), 0))
         if logo_dur <= 0 and is_image:
@@ -1622,6 +1621,11 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             lead = LEAD_MIN
 
         start_time, extend, total_dur = compute_endcard_timing(main_dur, logo_dur, lead)
+        if start_time <= 0.001 and main_dur > 1.0 and lead >= main_dur * 0.9:
+            self.log(
+                f"  提示: 叠入前时长({lead:.1f}s)接近主片全长({main_dur:.1f}s)，"
+                "落版会从开头出现；可在「浮层落版」调小「叠入前时长」"
+            )
         vw, vh, main_rot = probe_video_geometry(v20.FFPROBE_PATH, inp)
         try:
             ow, oh, ov_rot = probe_video_geometry(v20.FFPROBE_PATH, overlay_path)
@@ -1641,6 +1645,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             main_rotation=main_rot,
             overlay_rotation=ov_rot,
             start_time=start_time,
+            logo_duration=logo_dur,
         )
         keep_audio = bool(self.overlay_keep_audio.get()) and not is_image
         main_has = self._has_audio(inp)
@@ -1694,7 +1699,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self.ffmpeg(cmd)
 
     def apply_overlay_sticker(self, inp: str, overlay_path: str, out: str) -> None:
-        vw, _vh = self.get_video_size(inp)
+        vw, vh = self.get_video_size(inp)
         cx, cy = self._png_overlay_custom_xy()
         full = (self.png_wm_time_mode.get() or "全程") == "全程"
         try:
@@ -1705,13 +1710,21 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             te = float(self.png_wm_time_end.get() or 0)
         except ValueError:
             te = 0.0
+        main_dur = float(self.get_duration(inp) or 0)
         if full:
-            te = max(te, float(self.get_duration(inp) or 0) or 9999.0)
+            te = max(te, main_dur or 9999.0)
 
         mode = (self.png_wm_mode.get() or "fullscreen").strip()
         if mode == "fullscreen":
             enable = "" if full else f":enable='between(t\\,{max(0.0, ts)}\\,{max(ts, te)})'"
-            filt = f"[0:v]setsar=1[base];[1:v]format=rgba[wm];[wm][base]scale2ref=iw:ih[wm2][b];[b][wm2]overlay=0:0:format=auto{enable}[tmpv]"
+            sw = max(2, int(vw) // 2 * 2)
+            sh = max(2, int(vh) // 2 * 2)
+            filt = (
+                f"[0:v]setsar=1[base];"
+                f"[1:v]format=rgba,scale={sw}:{sh}:flags=lanczos[wm2];"
+                f"[base][wm2]overlay=0:0:format=auto{enable}[tmpv]"
+            )
+            mode_label = "全屏贴合"
         else:
             try:
                 w = int(float(self.png_wm_w.get() or 0))
@@ -1742,10 +1755,10 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             filt = filt.replace("format=rgba,scale=", f"format=rgba,scale={w}:{h}")
             # build_sticker_overlay_filter 输出标签是 [v]，统一改为 [tmpv]
             filt = filt.replace("[v]", "[tmpv]")
+            mode_label = self.png_wm_position.get() or "居中"
 
         # V21-stable: x264(yuv420p) 兜底为偶数宽高，避免 -22 (Invalid argument)
         filt = f"{filt};[tmpv]scale=trunc(iw/2)*2:trunc(ih/2)*2[v]"
-        main_dur = float(self.get_duration(inp) or 0)
         cmd = [
             v20.FFMPEG_PATH, "-y",
             "-i", inp,
@@ -1755,6 +1768,14 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             "-map", "0:a?",
             *v20.VENC, *v20.AENC,
         ]
+        if main_dur > 0:
+            dur_hint = f"{main_dur:.0f}s"
+        else:
+            dur_hint = "未知时长"
+        self.log(
+            f"  静态水印编码中… {sw if mode == 'fullscreen' else vw}x{sh if mode == 'fullscreen' else vh}"
+            f" · 约{dur_hint} · {mode_label}（全片重编码，日志每 3 秒刷新进度）"
+        )
         if main_dur > 0:
             cmd.extend(["-t", f"{main_dur}"])
         else:
@@ -1831,16 +1852,43 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         """idx = 当前正在处理的序号（1-based）；进度条仍表示已完成数 = idx-1。"""
         done = max(0, idx - 1)
         phase = str(getattr(self, "_fission_phase_label", "") or "").strip()
+        file_name = ""
+        if step and step not in ("校验源文件", "写入成品"):
+            file_name = step
+        elif getattr(self, "_fission_running", False):
+            try:
+                in_dir = (self.global_input_folder.get() or "").strip()
+                files = self._list_videos(in_dir) if in_dir else []
+                if 0 < idx <= len(files):
+                    file_name = files[idx - 1]
+            except Exception:
+                pass
+        pct = (done / total * 100.0) if total > 0 else 0.0
 
-        def _apply(d=done, t=total, i=idx, s=step, p=phase):
+        def _apply(d=done, t=total, i=idx, s=step, p=phase, fn=file_name, pc=pct):
             if hasattr(self, "progress"):
                 self.progress["maximum"] = t
                 self.progress["value"] = d
             head = f"[{p}] " if p else ""
+            disp = fn or s
             msg = f"{head}正在处理第 {i}/{t} 条（已完成 {d}）"
-            if s:
-                msg += f" · {s}"
+            if disp:
+                msg += f" · {disp}"
             self.status_var.set(msg)
+            if getattr(self, "_fission_running", False):
+                panel = getattr(self, "_fission_panel", None)
+                if panel is not None and hasattr(panel, "set_run_progress"):
+                    try:
+                        panel.set_run_progress(
+                            phase=p or "批处理",
+                            file_name=fn,
+                            file_idx=i,
+                            file_total=t,
+                            percent=pc,
+                            label=s or "",
+                        )
+                    except Exception:
+                        pass
 
         self.root.after(0, _apply)
 
@@ -1877,7 +1925,6 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
             enabled = any([
                 self._is_enabled("cut_enable"), self._is_enabled("ratio_enable"),
-                self._is_enabled("enhance_enable"),
                 self._is_enabled("ending_enable"), self._is_enabled("logo_enable"),
                 self._is_enabled("enable_mov_watermark"), self._is_enabled("png_wm_enable"),
                 self._is_enabled("overlay_enable"),
@@ -1919,14 +1966,25 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             )
             if self._is_enabled("enable_mov_watermark") and self._is_enabled("mov_color_protect"):
                 self.log("提示：已开「颜色保护」（先缩放再去预乘，颜色更干净，仍保持秒级）")
+            self.log("快捷键：空格=暂停/继续 · Esc=停止")
 
             total = len(files)
             batch_start = time.time()
             self._batch_running = True
             self._batch_failed = 0
+            ctl = getattr(self, "_batch_ctl", None)
+            if ctl is not None:
+                ctl.begin()
             self.root.after(0, lambda: self.update_progress_ui(0, total, batch_start))
+            stopped_by_user = False
 
             for idx, name in enumerate(files, 1):
+                if ctl is not None and ctl.wait_if_paused():
+                    stopped_by_user = True
+                    break
+                if ctl is not None and ctl.should_stop:
+                    stopped_by_user = True
+                    break
                 inp = os.path.join(in_dir, name)
                 out_name = self.make_batch_output_name(name, idx, "")
                 out = self.resolve_output_path(out_dir, out_name)
@@ -1936,7 +1994,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                     self.root.after(0, lambda c=cur_idx: self.update_progress_ui(c, total, batch_start))
                     continue
                 self.log(f"\n开始处理 [{idx}/{total}] {name}")
-                self._set_batch_step_status(idx, total, "校验源文件")
+                self._set_batch_step_status(idx, total, name)
                 from core.ffmpeg_safe import probe_media_ok
                 src_ok, src_err = probe_media_ok(v20.FFMPEG_PATH, inp, ffprobe=v20.FFPROBE_PATH)
                 if not src_ok:
@@ -1945,9 +2003,14 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                 current = inp
                 try:
                     for step_key in pipe:
+                        if ctl is not None and ctl.should_stop:
+                            stopped_by_user = True
+                            break
                         current = self._run_batch_step(
                             step_key, current, inp, out, temps, idx, total,
                         )
+                    if stopped_by_user:
+                        raise RuntimeError("用户已停止")
 
                     self._set_batch_step_status(idx, total, "写入成品")
                     if current != inp:
@@ -1959,6 +2022,10 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                     self.log(f"  完成: {name}")
                 except Exception as e:
                     from core.overlay_engine import friendly_exception_message
+                    if "用户已停止" in str(e):
+                        stopped_by_user = True
+                        self.log("  已停止")
+                        break
                     self._batch_failed = getattr(self, "_batch_failed", 0) + 1
                     self.failed_files.append(name)
                     self.log(f"  失败：{friendly_exception_message(e)}")
@@ -1983,15 +2050,24 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             failed_cnt = getattr(self, "_batch_failed", 0)
             self.root.after(0, lambda: self.update_progress_ui(total, total, batch_start, failed=failed_cnt))
             self.root.after(0, self._show_failed_banner)
-            self.log("\n批处理完成" + (f"，{failed_cnt} 条失败" if failed_cnt else ""))
-            msg = f"已处理 {total} 个视频" + (f"，{failed_cnt} 条失败" if failed_cnt else "")
+            if stopped_by_user:
+                self.log("\n批处理已停止")
+            else:
+                self.log("\n批处理完成" + (f"，{failed_cnt} 条失败" if failed_cnt else ""))
+            msg = (
+                "已停止"
+                if stopped_by_user
+                else f"已处理 {total} 个视频" + (f"，{failed_cnt} 条失败" if failed_cnt else "")
+            )
             try:
                 from modules.tool_stats import log_batch_processing
                 log_batch_processing(self, max(0, total - failed_cnt), failed_cnt)
             except Exception:
                 pass
-            if not silent:
+            if not silent and not stopped_by_user:
                 self.root.after(0, lambda: messagebox.showinfo("完成", msg))
+            elif not silent and stopped_by_user:
+                self.root.after(0, lambda: messagebox.showinfo("已停止", msg))
         except Exception as e:
             self._log_exception("process_batch", e)
             err = str(e)
@@ -2002,6 +2078,9 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         finally:
             self._processing = False
             self._batch_running = False
+            ctl = getattr(self, "_batch_ctl", None)
+            if ctl is not None and not getattr(self, "_fission_running", False):
+                ctl.end()
 
 
 def _load_ui_theme() -> str:

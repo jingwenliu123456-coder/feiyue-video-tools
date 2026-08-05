@@ -110,6 +110,48 @@ def probe_video_geometry(ffprobe: str, path: str | Path) -> tuple[int, int, int]
         return 1920, 1080, 0
 
 
+def probe_media_duration(ffprobe: str, path: str | Path) -> float:
+    """尽量准确的媒体时长：format → 视频流 duration。"""
+    p = Path(path)
+    if not p.is_file():
+        return 0.0
+    try:
+        from core.overlay_engine import probe_duration
+
+        d = float(probe_duration(ffprobe, p) or 0.0)
+        if d > 0.01:
+            return d
+    except Exception:
+        pass
+    try:
+        from core.overlay_engine import _subprocess_flags
+
+        flags = _subprocess_flags()
+    except Exception:
+        flags = 0
+    try:
+        r = subprocess.run(
+            [
+                ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", str(p),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=flags,
+        )
+        if r.returncode == 0 and (r.stdout or "").strip():
+            v = float(r.stdout.strip())
+            if v > 0.01:
+                return v
+    except (OSError, TypeError, ValueError):
+        pass
+    return 0.0
+
+
 def probe_has_audio(ffprobe: str, path: str | Path) -> bool:
     """检测文件是否含音轨（兼容 MOV 等非标准流顺序）。"""
     p = Path(path)
@@ -147,9 +189,11 @@ def compute_endcard_timing(
     lead_time: float,
 ) -> tuple[float, float, float]:
     """返回 (start_time, extend, total_duration)。"""
-    lead = clamp_lead(lead_time)
     main_dur = max(0.0, float(main_duration))
     logo_dur = max(0.0, float(logo_duration))
+    lead = clamp_lead(lead_time)
+    if main_dur > 0.05:
+        lead = min(lead, max(LEAD_MIN, main_dur - 0.05))
     start_time = max(0.0, main_dur - lead)
     extend = max(0.0, (start_time + logo_dur) - main_dur)
     total_duration = max(main_dur, start_time + logo_dur)
@@ -195,6 +239,7 @@ def build_endcard_overlay_filter(
     main_rotation: int = 0,
     overlay_rotation: int = 0,
     start_time: float = 0.0,
+    logo_duration: float = 0.0,
 ) -> str:
     """
     模式 A：落版从 start_time 起叠（视频用 setpts，不用 -itsoffset，避免音画时间轴打架）。
@@ -206,8 +251,9 @@ def build_endcard_overlay_filter(
     rot0 = rotation_vf(main_rotation)
     rot1 = rotation_vf(overlay_rotation)
     st = max(0.0, float(start_time))
-    # 统一用 setpts 把落版画面推到叠入时刻（勿再用 -itsoffset，否则 amix 常听不到落版音）
-    pts = f"setpts=PTS-STARTPTS+{st}/TB"
+    ld = max(0.01, float(logo_duration or 0))
+    # trim 限制落版长度，再 setpts 推到叠入时刻；避免 Mac/VFR 下全程闪动首帧
+    pts_chain = f"trim=duration={ld},setpts=PTS-STARTPTS+{st}/TB"
 
     # 主画面：旋转 → 统一到显示尺寸 + 方形像素
     main_body = _chain_prefix(
@@ -230,12 +276,12 @@ def build_endcard_overlay_filter(
             f"scale={mw}:{mh}:force_original_aspect_ratio=decrease",
             f"pad={mw}:{mh}:(ow-iw)/2:(oh-ih)/2:black@0",
             "setsar=1",
-            pts,
+            pts_chain,
         )
         x_expr, y_expr = "0", "0"
     elif ow == mw and oh < mh and not rot1:
         # 同宽更矮的条带落版：底对齐（历史行为）
-        logo_body = _chain_prefix(rot1, "format=rgba", "setsar=1", pts)
+        logo_body = _chain_prefix(rot1, "format=rgba", "setsar=1", pts_chain)
         x_expr, y_expr = "0", "H-h"
     else:
         tw = max(2, int(mw * sp / 100.0) // 2 * 2)
@@ -244,14 +290,15 @@ def build_endcard_overlay_filter(
             "format=rgba",
             f"scale={tw}:-2:force_original_aspect_ratio=decrease",
             "setsar=1",
-            pts,
+            pts_chain,
         )
         x_expr, y_expr = overlay_xy(position, custom_x=custom_x, custom_y=custom_y)
 
+    enable = f":enable='gte(t\\,{st:.3f})'" if st > 0.001 else ""
     return (
         f"{main_chain};"
         f"[1:v]{logo_body}[logo];"
-        f"[main][logo]overlay=x={x_expr}:y={y_expr}:shortest=0:eof_action=pass[v]"
+        f"[main][logo]overlay=x={x_expr}:y={y_expr}:shortest=0:eof_action=pass{enable}[v]"
     )
 
 

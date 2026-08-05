@@ -111,7 +111,9 @@ class NamingConventionPanel(ttk.Frame):
         self.tree.column("old", width=220, minwidth=80)
         self.tree.column("new", width=280, minwidth=120)
         self.tree.column("note", width=120, minwidth=60)
-        vsb = ttk.Scrollbar(preview_frame, orient="vertical", command=self.tree.yview)
+        from ui.workbench_skin import make_tk_vscrollbar
+
+        vsb = make_tk_vscrollbar(preview_frame, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")

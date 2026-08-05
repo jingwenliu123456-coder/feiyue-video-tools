@@ -169,7 +169,7 @@ def default_config() -> dict[str, Any]:
         "legacy_dash_n": 2,
         "rename_source": "",
         "rename_target": "",
-        "rename_mode": "replace",
+        "rename_mode": "click",
         "index_digits": 2,
         "date_format": "4",
         "brand_extra": [],
@@ -252,6 +252,8 @@ class NamingToolApp:
         self._custom_tags_by_type: dict[str, list[str]] = default_tags_by_type_local()
         self._saved_presets: list[dict[str, str]] = []
         self._preview_rows: list[dict[str, Any]] = []
+        from modules.rename_history import RenameHistory
+        self._rename_history = RenameHistory()
         self._legacy_keep_tags: list[str] = []
         self._legacy_strip_tags: list[str] = []
         self.legacy_keep_regex_var = tk.BooleanVar(value=False)
@@ -293,13 +295,18 @@ class NamingToolApp:
         self.legacy_var = tk.BooleanVar(value=False)
         self.rename_source_var = tk.StringVar()
         self.rename_target_var = tk.StringVar()
-        self.rename_mode = tk.StringVar(value="replace")
+        self.rename_mode = tk.StringVar(value="click")
         self.scan_subfolders_var = tk.BooleanVar(value=False)
         self.preview_status_var = tk.StringVar(value="请选择文件夹后点「扫描」")
         self.batch_field_var = tk.StringVar(value="语言")
         self.batch_value_var = tk.StringVar()
         self.preview_find_var = tk.StringVar()
         self.preview_replace_var = tk.StringVar()
+        self.rule_add_text_var = tk.StringVar()
+        self.rule_add_pos_var = tk.StringVar(value="suffix")
+        self.rule_del_text_var = tk.StringVar()
+        self.rule_del_mode_var = tk.StringVar(value="remove_all")
+        self.rule_del_n_var = tk.StringVar(value="0")
         self.adv_find_var = tk.StringVar()
         self.adv_replace_var = tk.StringVar()
         self.adv_scope_var = tk.StringVar(value="1~-1")
@@ -347,7 +354,28 @@ class NamingToolApp:
         from modules.theme_utils import is_dark_mode
 
         if self._skip_chrome or self._embed_parent is not None:
-            self._card_colors = card_colors(dark=False)
+            ui_theme = getattr(self.root, "_ui_theme", None) or getattr(self.root, "_bootstrap_theme", None) or "flatly"
+            if self._embed_parent is not None:
+                from ui.workbench_skin import WB_BG, WB_BORDER, WB_CARD, WB_MUTED, WB_TEXT
+
+                base = (
+                    card_colors(dark=is_dark_mode())
+                    if ui_theme == UI_THEME_NONE
+                    else card_colors(dark=not is_light_theme(str(ui_theme)))
+                )
+                self._card_colors = {
+                    **base,
+                    "bg": WB_CARD,
+                    "card": WB_CARD,
+                    "fg": WB_TEXT,
+                    "border_off": WB_BORDER,
+                    "muted": WB_MUTED,
+                }
+                self._embed_scroll_bg = WB_BG
+            elif ui_theme == UI_THEME_NONE:
+                self._card_colors = card_colors(dark=is_dark_mode())
+            else:
+                self._card_colors = card_colors(dark=not is_light_theme(str(ui_theme)))
             self.module_colors = dict(DEFAULT_MODULE_COLORS)
             self._module_cards: dict[str, tk.Frame] = {}
             self.status_var = tk.StringVar(value="请选择文件夹后点「扫描」")
@@ -450,6 +478,18 @@ class NamingToolApp:
         from modules.ui_skin import FONTS, make_button, make_scrollable_frame, make_toggle
 
         host = self._embed_parent if self._embed_parent is not None else self.root
+        if getattr(self, "_content", None) is not None:
+            try:
+                if self._content.winfo_exists():
+                    return
+            except tk.TclError:
+                pass
+        if self._embed_parent is not None:
+            for w in list(self._embed_parent.winfo_children()):
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
         self._content = ttk.Frame(host)
         self._content.pack(fill=tk.BOTH, expand=True)
 
@@ -460,7 +500,11 @@ class NamingToolApp:
             except Exception:
                 pass
 
-        scroll_bg = "#F2F2F7" if self._embed_parent is not None else self._card_colors.get("bg", "#2B303B")
+        scroll_bg = getattr(self, "_embed_scroll_bg", None) or (
+            "#F2F2F7" if self._embed_parent is not None else self._card_colors.get("bg", "#2B303B")
+        )
+
+        self._drop_hook_targets: list[Any] = []
 
         upper_shell = ttk.Frame(self._content)
         upper_shell.pack(fill=tk.BOTH, expand=True, padx=self._pad["sm"], pady=self._pad["sm"])
@@ -481,16 +525,21 @@ class NamingToolApp:
             r1, "含子文件夹", self.scan_subfolders_var,
             command=lambda: self._refresh_preview(notify=True),
         ).grid(row=0, column=9, padx=4, sticky="w")
-        ttk.Label(r1, text="起始:").grid(row=0, column=4, padx=(12, 2))
+        ttk.Label(r1, text="模板序号起始:").grid(row=0, column=4, padx=(12, 2))
         ttk.Entry(r1, textvariable=self.start_var, width=6).grid(row=0, column=5)
-        ttk.Label(r1, text="序号位:").grid(row=0, column=6, padx=(8, 2))
+        ttk.Label(r1, text="位数:").grid(row=0, column=6, padx=(8, 2))
         idx_cb = ttk.Combobox(r1, textvariable=self.index_digits_var, width=4, state="readonly",
                               values=["1", "2", "3"])
         idx_cb.grid(row=0, column=7)
         idx_cb.bind("<<ComboboxSelected>>", lambda e: self._on_index_digits_change())
-        ttk.Label(r1, text="(如 1–9 / 00–99)", font=FONTS["caption"], foreground="gray").grid(row=0, column=8, padx=2)
+        ttk.Label(r1, text="(供模板与自动编号)", font=FONTS["caption"], foreground="gray").grid(row=0, column=8, padx=2)
+        self._folder_drop_hint = ttk.Label(
+            r1, text="路径栏或下方预览区均可拖入文件夹 / 单个或多个文件", font=FONTS["caption"], foreground="gray",
+        )
+        self._folder_drop_hint.grid(row=1, column=0, columnspan=10, sticky="w", pady=(4, 0))
         self._trace(self.folder_var)
         self._trace(self.start_var)
+        self._drop_hook_targets.extend([folder_card, r1])
 
         tpl_card, _, r2 = self._naming_card(
             upper, "命名模板（{序号}位置可编辑，扩展名沿用原文件）", "📝", "naming_template",
@@ -610,7 +659,9 @@ class NamingToolApp:
         tag_scroll_outer = ttk.Frame(suggest)
         tag_scroll_outer.pack(side="left", fill="both", expand=True, padx=4)
         self._tag_scroll_canvas = tk.Canvas(tag_scroll_outer, height=58, highlightthickness=0, bd=0)
-        self._tag_scroll_x = ttk.Scrollbar(tag_scroll_outer, orient="horizontal", command=self._tag_scroll_canvas.xview)
+        from ui.workbench_skin import make_tk_hscrollbar, make_tk_vscrollbar
+
+        self._tag_scroll_x = make_tk_hscrollbar(tag_scroll_outer, command=self._tag_scroll_canvas.xview)
         self._tag_scroll_canvas.configure(xscrollcommand=self._tag_scroll_x.set)
         self._tag_scroll_canvas.pack(side="top", fill="x", expand=True)
         self._tag_scroll_x.pack(side="bottom", fill="x")
@@ -627,142 +678,45 @@ class NamingToolApp:
         make_button(suggest, "+ 添加当前到常用", self._add_to_library, kind="outline").pack(side="left", padx=2)
         make_button(suggest, "× 清空当前类型", self._clear_type_tags, kind="danger").pack(side="left", padx=2)
         make_button(suggest, "编辑常用标签", self._manage_tags_dialog, kind="outline").pack(side="left", padx=2)
-        make_toggle(r4, "旧版文件名清理模式", self.legacy_var, command=self._on_legacy_mode_toggle).pack(
-            anchor="w", pady=(6, 0))
-
-        self._legacy_strip_frame = ttk.Frame(r4)
-        self._legacy_strip_frame.pack(fill="x", pady=(4, 0))
-
-        self._legacy_dash_row = ttk.Frame(self._legacy_strip_frame)
-        self._legacy_dash_row.pack(fill="x", pady=(0, 4))
-        ttk.Checkbutton(
-            self._legacy_dash_row,
-            text="保留第",
-            variable=self.legacy_dash_keep_var,
-            command=self._on_legacy_dash_toggle,
-        ).pack(side="left")
-        dash_spin = ttk.Spinbox(
-            self._legacy_dash_row,
-            from_=1,
-            to=20,
-            width=4,
-            textvariable=self.legacy_dash_n_var,
-            command=self._on_legacy_dash_toggle,
-        )
-        dash_spin.pack(side="left", padx=2)
-        dash_spin.bind("<KeyRelease>", lambda _e: self._on_legacy_dash_toggle())
-        dash_spin.bind("<FocusOut>", lambda _e: self._on_legacy_dash_toggle())
-        ttk.Label(self._legacy_dash_row, text="个「-」之后的内容作标签").pack(side="left")
-        ttk.Label(
-            self._legacy_dash_row,
-            text="有「-」按段截取；无「-」整段作标签；AR-KOL-名 自动保留 KOL",
-            font=FONTS["caption"], foreground="gray",
-        ).pack(side="left", padx=(8, 0))
-
-        self._legacy_keep_row = ttk.Frame(self._legacy_strip_frame)
-        self._legacy_keep_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(self._legacy_keep_row, text="旧版清理保留词:").pack(side="left")
-        ttk.Label(
-            self._legacy_keep_row, textvariable=self._legacy_keep_count_var,
-            foreground="gray",
-        ).pack(side="left", padx=(4, 8))
-        self._legacy_keep_edit_btn = make_button(
-            self._legacy_keep_row, "编辑保留词", self._manage_legacy_keep_tags, kind="outline",
-        )
-        self._legacy_keep_edit_btn.pack(side="left", padx=2)
-        make_button(
-            self._legacy_keep_row, "从上方标签填入", self._fill_keep_from_tag_fields, kind="outline",
-        ).pack(side="left", padx=2)
-        make_button(
-            self._legacy_keep_row, "从预览导入", self._import_keep_from_preview, kind="outline",
-        ).pack(side="left", padx=2)
-        self._legacy_keep_hint = ttk.Label(
-            self._legacy_keep_row,
-            text="点「编辑保留词」填写；勾选正则后在同一编辑框写正则",
-            font=FONTS["caption"], foreground="gray",
-        )
-        self._legacy_keep_hint.pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(
-            self._legacy_keep_row,
-            text="正则模式",
-            variable=self.legacy_keep_regex_var,
-            command=self._on_legacy_regex_toggle,
-        ).pack(side="left", padx=(8, 0))
-
-        self._legacy_strip_row = ttk.Frame(self._legacy_strip_frame)
-        self._legacy_strip_row.pack(fill="x")
-        ttk.Label(self._legacy_strip_row, text="旧版清理剔除词:").pack(side="left")
-        ttk.Label(
-            self._legacy_strip_row, textvariable=self._legacy_strip_count_var,
-            foreground="gray",
-        ).pack(side="left", padx=(4, 8))
-        self._legacy_strip_edit_btn = make_button(
-            self._legacy_strip_row, "编辑剔除词", self._manage_legacy_strip_tags, kind="outline",
-        )
-        self._legacy_strip_edit_btn.pack(side="left", padx=2)
-        make_button(
-            self._legacy_strip_row, "从预览导入", self._import_strip_from_preview, kind="outline",
-        ).pack(side="left", padx=2)
-        self._legacy_strip_hint = ttk.Label(
-            self._legacy_strip_row,
-            text="点「编辑剔除词」填写；勾选正则后在同一编辑框写正则",
-            font=FONTS["caption"], foreground="gray",
-        )
-        self._legacy_strip_hint.pack(side="left", padx=(8, 0))
-        ttk.Checkbutton(
-            self._legacy_strip_row,
-            text="正则模式",
-            variable=self.legacy_strip_regex_var,
-            command=self._on_legacy_regex_toggle,
-        ).pack(side="left", padx=(8, 0))
-        self._sync_legacy_regex_ui()
 
         preview_card, _, preview_frame = self._naming_card(
             upper, "规范命名预览", "👁️", "naming_preview", content_fill_both=True,
         )
         preview_card.grid(row=4, column=0, sticky="nsew", padx=self._pad["sm"], pady=self._pad["sm"])
         preview_frame.columnconfigure(0, weight=1)
-        preview_frame.rowconfigure(3, weight=1)
+        preview_frame.rowconfigure(2, weight=1)
+        self._preview_drop_card = preview_card
 
-        # 查找替换：对勾选行的「新文件名」做字符串替换
-        self._preview_find_frame = ttk.Frame(preview_frame)
-        self._preview_find_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ttk.Label(self._preview_find_frame, text="查找替换:").pack(side="left", padx=(0, 4))
-        ttk.Label(self._preview_find_frame, text="查找").pack(side="left")
-        ttk.Entry(self._preview_find_frame, textvariable=self.preview_find_var, width=12).pack(side="left", padx=2)
-        ttk.Label(self._preview_find_frame, text="替换为").pack(side="left", padx=(6, 0))
-        ttk.Entry(self._preview_find_frame, textvariable=self.preview_replace_var, width=12).pack(side="left", padx=2)
-        make_button(
-            self._preview_find_frame, "应用到选中项", self._apply_preview_find_replace, kind="info",
-        ).pack(side="left", padx=6)
-        make_button(
-            self._preview_find_frame, "解除锁定并按模板重算", self._unlock_preview_manual_selected, kind="outline",
-        ).pack(side="left", padx=4)
+        info_row = ttk.Frame(preview_frame)
+        info_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 2))
+        info_row.columnconfigure(0, weight=1)
         ttk.Label(
-            self._preview_find_frame, text="可重复查找替换；顺序不对就解除锁定再来",
-            font=("", 8), foreground="gray",
-        ).pack(side="left", padx=4)
+            info_row, textvariable=self.preview_status_var,
+            font=FONTS["body"], foreground="gray",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            info_row,
+            text="预览表可拖入文件 · 外部路径文件会单独记住原位置",
+            font=FONTS["caption"], foreground="gray",
+        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-        self._legacy_batch_frame = ttk.Frame(preview_frame)
-        self._legacy_batch_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        ttk.Label(self._legacy_batch_frame, text="批量修改字段:").pack(side="left", padx=(0, 4))
-        self.batch_field_combo = ttk.Combobox(
-            self._legacy_batch_frame, textvariable=self.batch_field_var,
-            values=BATCH_FIELD_LABELS, width=8, state="readonly",
+        toolbar = ttk.Frame(preview_frame)
+        toolbar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        make_button(toolbar, "刷新", lambda: self._refresh_preview(notify=True), kind="outline").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "执行重命名", self._execute_rename, kind="success").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "应用规则", self._apply_rename_chain, kind="info").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "撤销", self._history_undo, kind="outline").pack(side=tk.LEFT, padx=(8, 1))
+        make_button(toolbar, "重做", self._history_redo, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "解除锁定", self._unlock_preview_manual_selected, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "打开文件夹", self._open_naming_folder, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_button(toolbar, "对照改名…", self._open_batch_rename, kind="outline").pack(side=tk.LEFT, padx=1)
+        self._history_hint_var = tk.StringVar(value="")
+        ttk.Label(toolbar, textvariable=self._history_hint_var, font=("", 8), foreground="gray").pack(
+            side=tk.RIGHT, padx=4,
         )
-        self.batch_field_combo.pack(side="left", padx=2)
-        ttk.Label(self._legacy_batch_frame, text="新值:").pack(side="left", padx=(8, 4))
-        ttk.Entry(self._legacy_batch_frame, textvariable=self.batch_value_var, width=14).pack(side="left", padx=2)
-        make_button(
-            self._legacy_batch_frame, "应用到选中项", self._apply_batch_override, kind="outline",
-        ).pack(side="left", padx=6)
-        ttk.Label(
-            self._legacy_batch_frame, text="未勾选的文件仍按全局字段处理",
-            font=("", 8), foreground="gray",
-        ).pack(side="left", padx=4)
 
         cols = ("sel", "old", "new", "note")
-        self.tree = ttk.Treeview(preview_frame, columns=cols, show="headings", height=6)
+        self.tree = ttk.Treeview(preview_frame, columns=cols, show="headings", height=8)
         try:
             style = ttk.Style()
             style.configure("Naming.Treeview", rowheight=22)
@@ -776,7 +730,7 @@ class NamingToolApp:
         self.tree.column("sel", width=36, minwidth=36, stretch=False, anchor="center")
         self.tree.column("old", width=200, minwidth=80, stretch=True)
         self.tree.column("new", width=260, minwidth=100, stretch=True)
-        self.tree.column("note", width=320, minwidth=180, stretch=True)
+        self.tree.column("note", width=200, minwidth=80, stretch=True)
         self.tree.tag_configure("manual_new", foreground="#1a7f37")
         self.tree.bind("<ButtonRelease-1>", self._on_preview_tree_click)
         self.tree.bind("<Double-Button-1>", self._on_preview_tree_double_click)
@@ -785,41 +739,184 @@ class NamingToolApp:
         self.tree.bind("<Leave>", lambda _e: self._hide_preview_note_tip())
         self._preview_note_tip: Optional[tk.Toplevel] = None
         self._preview_note_tip_text = ""
-        vsb = ttk.Scrollbar(preview_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(preview_frame, orient="horizontal", command=self.tree.xview)
+        from ui.workbench_skin import make_tk_hscrollbar, make_tk_vscrollbar
+
+        vsb = make_tk_vscrollbar(preview_frame, command=self.tree.yview)
+        hsb = make_tk_hscrollbar(preview_frame, command=self.tree.xview)
         self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        info_row = ttk.Frame(preview_frame)
-        info_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        info_row.columnconfigure(0, weight=1)
-        ttk.Label(
-            info_row, textvariable=self.preview_status_var,
-            font=FONTS["body"], foreground="gray",
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            info_row,
-            text="勾选后分批处理 · 点表头全选 · 悬停备注看全文 · 双击原名复制 / 双击新名可改",
-            font=FONTS["caption"], foreground="gray",
-        ).grid(row=0, column=1, sticky="e", padx=(8, 0))
-        self.tree.grid(row=3, column=0, sticky="nsew")
-        vsb.grid(row=3, column=1, sticky="ns")
-        hsb.grid(row=4, column=0, sticky="ew")
+        self.tree.grid(row=2, column=0, sticky="nsew")
+        vsb.grid(row=2, column=1, sticky="ns")
+        hsb.grid(row=3, column=0, sticky="ew")
         self.tree.bind("<Configure>", self._autofit_preview_columns, add="+")
-        self._update_legacy_batch_visibility()
+        self._drop_hook_targets.extend([preview_frame, self.tree, preview_card, self._upper_canvas])
+
+        self._rules_expanded = tk.BooleanVar(value=False)
+        rules_hdr = ttk.Frame(preview_frame)
+        rules_hdr.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        from modules.ui_skin import make_checkbutton
+        from modules.platform_utils import ui_rules_expand_label
+
+        make_checkbutton(
+            rules_hdr,
+            ui_rules_expand_label(),
+            self._rules_expanded,
+            command=self._toggle_rules_panel,
+        ).pack(side=tk.LEFT)
+
+        self._rules_body = ttk.Frame(preview_frame)
+        # 默认收起，不 grid
+
+        from ui.rename_rule_blocks import RenameRuleBlocksPanel
+
+        self._rename_blocks = RenameRuleBlocksPanel(
+            self._rules_body,
+            legacy_embed=self._embed_legacy_rule_block,
+            colors=self._card_colors,
+            refresh_callback=self._apply_rename_chain_live,
+        )
+        self._rename_blocks.pack(fill=tk.BOTH, expand=True)
+        try:
+            self.root.bind("<Control-z>", lambda _e: self._history_undo())
+            self.root.bind("<Control-y>", lambda _e: self._history_redo())
+        except Exception:
+            pass
+
         self._update_legacy_strip_visibility()
         self._update_preview_select_ui()
-
-        act_row = ttk.Frame(upper, padding=(self._pad["sm"], self._pad["xs"]))
-        act_row.grid(row=5, column=0, sticky="ew")
-        make_button(act_row, "刷新预览", lambda: self._refresh_preview(notify=True), kind="outline").pack(side="left", padx=4)
-        make_button(act_row, "执行规范重命名", self._execute_rename, kind="success").pack(side="left", padx=4)
-        make_button(act_row, "打开文件夹", self._open_naming_folder, kind="info").pack(side="left", padx=4)
-        make_button(act_row, "对照改名…", self._open_batch_rename, kind="outline").pack(side="left", padx=12)
 
         self._batch_rename_win = None
         self.src_listbox = None
         self.dst_listbox = None
         self.clipboard_label = None
         self._polish_tk_widgets()
+        self.root.after_idle(self._install_naming_drop_hooks)
+
+    def _install_naming_drop_hooks(self, *, _retry: int = 0) -> None:
+        """窗口就绪后再挂拖放（嵌入 V24 时过早 hook 可能失败）。"""
+        if getattr(self, "_drop_hooks_ok", False):
+            return
+        ok = False
+        seen: set[int] = set()
+        for w in getattr(self, "_drop_hook_targets", []):
+            if w is None:
+                continue
+            wid = id(w)
+            if wid in seen:
+                continue
+            seen.add(wid)
+            try:
+                if w.winfo_exists() and self._hook_naming_drop(w):
+                    ok = True
+            except tk.TclError:
+                pass
+        if ok:
+            self._drop_hooks_ok = True
+        elif _retry < 2:
+            self.root.after(350, lambda: self._install_naming_drop_hooks(_retry=_retry + 1))
+            return
+        hint = getattr(self, "_folder_drop_hint", None)
+        if hint is None:
+            return
+        try:
+            if ok:
+                hint.config(
+                    text="路径栏或下方预览区均可拖入文件夹 / 单个或多个文件",
+                    foreground="gray",
+                )
+            else:
+                hint.config(
+                    text="拖放不可用，请用「浏览」选择（需 Python 3.13 + pip install windnd）",
+                    foreground="#c0392b",
+                )
+        except tk.TclError:
+            pass
+
+    def _embed_legacy_rule_block(self, parent: tk.Frame) -> None:
+        """旧版清理方块：紧凑竖排，挂在规则面板最右侧。"""
+        from modules.ui_skin import make_button, make_toggle, make_checkbutton
+
+        bg = parent["bg"]
+        make_toggle(parent, "启用旧版清理", self.legacy_var, command=self._on_legacy_mode_toggle).pack(
+            anchor="w", pady=(0, 2),
+        )
+
+        self._legacy_strip_frame = tk.Frame(parent, bg=bg)
+        self._legacy_strip_frame.pack(fill=tk.X)
+
+        dash = tk.Frame(self._legacy_strip_frame, bg=bg)
+        dash.pack(fill=tk.X, pady=(0, 2))
+        make_checkbutton(
+            dash, text="保留第", variable=self.legacy_dash_keep_var, command=self._on_legacy_dash_toggle,
+        ).pack(side=tk.LEFT)
+        dash_spin = ttk.Spinbox(
+            dash, from_=1, to=20, width=3, textvariable=self.legacy_dash_n_var, command=self._on_legacy_dash_toggle,
+        )
+        dash_spin.pack(side=tk.LEFT, padx=2)
+        dash_spin.bind("<KeyRelease>", lambda _e: self._on_legacy_dash_toggle())
+        dash_spin.bind("<FocusOut>", lambda _e: self._on_legacy_dash_toggle())
+        ttk.Label(dash, text="个-之后作标签").pack(side=tk.LEFT)
+
+        keep = tk.Frame(self._legacy_strip_frame, bg=bg)
+        keep.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(keep, text="保留").pack(side=tk.LEFT)
+        ttk.Label(keep, textvariable=self._legacy_keep_count_var, foreground="gray").pack(side=tk.LEFT, padx=2)
+        self._legacy_keep_edit_btn = make_button(
+            keep, "编辑", self._manage_legacy_keep_tags, kind="outline",
+        )
+        self._legacy_keep_edit_btn.pack(side=tk.LEFT, padx=1)
+        make_button(keep, "标签", self._fill_keep_from_tag_fields, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_button(keep, "预览", self._import_keep_from_preview, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_checkbutton(
+            keep, text="正则", variable=self.legacy_keep_regex_var, command=self._on_legacy_regex_toggle,
+        ).pack(side=tk.LEFT, padx=(2, 0))
+
+        strip = tk.Frame(self._legacy_strip_frame, bg=bg)
+        strip.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(strip, text="剔除").pack(side=tk.LEFT)
+        ttk.Label(strip, textvariable=self._legacy_strip_count_var, foreground="gray").pack(side=tk.LEFT, padx=2)
+        self._legacy_strip_edit_btn = make_button(
+            strip, "编辑", self._manage_legacy_strip_tags, kind="outline",
+        )
+        self._legacy_strip_edit_btn.pack(side=tk.LEFT, padx=1)
+        make_button(strip, "预览", self._import_strip_from_preview, kind="outline").pack(side=tk.LEFT, padx=1)
+        make_checkbutton(
+            strip, text="正则", variable=self.legacy_strip_regex_var, command=self._on_legacy_regex_toggle,
+        ).pack(side=tk.LEFT, padx=(2, 0))
+
+        self._legacy_batch_frame = ttk.Frame(self._legacy_strip_frame)
+        self._legacy_batch_frame.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(self._legacy_batch_frame, text="批量字段:").pack(side=tk.LEFT)
+        self.batch_field_combo = ttk.Combobox(
+            self._legacy_batch_frame, textvariable=self.batch_field_var,
+            values=BATCH_FIELD_LABELS, width=6, state="readonly",
+        )
+        self.batch_field_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Entry(self._legacy_batch_frame, textvariable=self.batch_value_var, width=8).pack(side=tk.LEFT, padx=2)
+        make_button(
+            self._legacy_batch_frame, "应用", self._apply_batch_override, kind="outline",
+        ).pack(side=tk.LEFT, padx=2)
+
+        self._legacy_keep_hint = ttk.Label(parent, text="", font=("", 7), foreground="gray")
+        self._legacy_strip_hint = ttk.Label(parent, text="", font=("", 7), foreground="gray")
+        self._sync_legacy_regex_ui()
+        self._update_legacy_batch_visibility()
+        self._update_legacy_strip_visibility()
+
+    def _hook_naming_drop(self, widget) -> bool:
+        try:
+            from modules.folder_drop import hook_path_drop
+            return bool(hook_path_drop(widget, self._on_naming_paths_dropped))
+        except Exception:
+            return False
+
+    def _toggle_rules_panel(self) -> None:
+        body = getattr(self, "_rules_body", None)
+        if body is None:
+            return
+        if self._rules_expanded.get():
+            body.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        else:
+            body.grid_remove()
 
     def _open_batch_rename(self) -> None:
         """对照改名：左右双栏，单击复制 / 粘贴，低频功能独立窗口打开。"""
@@ -834,7 +931,7 @@ class NamingToolApp:
                 pass
 
         win = tk.Toplevel(self.root)
-        win.title("对照改名 — 单击复制 · 单击粘贴 · 双击编辑")
+        win.title("对照改名 — 点击替换 · 单击复制/粘贴 · 双击编辑")
         win.geometry("980x560")
         win.minsize(760, 420)
         try:
@@ -907,7 +1004,7 @@ class NamingToolApp:
         mode_f = ttk.Frame(frame)
         mode_f.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         ttk.Label(mode_f, text="模式:").pack(side="left", padx=4)
-        ttk.Radiobutton(mode_f, text="查找替换", variable=self.rename_mode, value="replace",
+        ttk.Radiobutton(mode_f, text="点击替换", variable=self.rename_mode, value="click",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
         ttk.Radiobutton(mode_f, text="附加模式", variable=self.rename_mode, value="append",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
@@ -915,9 +1012,11 @@ class NamingToolApp:
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
         make_button(mode_f, "刷新两列", self._refresh_rename_lists, kind="outline").pack(side="left", padx=12)
         make_button(mode_f, "执行批量附加重命名", self._execute_batch_rename_action, kind="success").pack(side="left", padx=4)
+        from modules.platform_utils import ui_hint_prefix
+
         ttk.Label(
             mode_f,
-            text="💡 附加模式：在扩展名前统一追加文字；高级查找替换：按出现次数批量改文件名",
+            text=f"{ui_hint_prefix()}点击替换：左栏单击复制文件名 → 右栏单击粘贴替换；附加/高级见各模式说明",
             font=FONTS["caption"], foreground="gray",
         ).pack(side="left", padx=8)
 
@@ -957,7 +1056,7 @@ class NamingToolApp:
         src_wrap.columnconfigure(0, weight=1)
         src_wrap.rowconfigure(0, weight=1)
         self.src_listbox = tk.Listbox(src_wrap, height=8, exportselection=False, font=("Consolas", 10))
-        src_vsb = ttk.Scrollbar(src_wrap, orient="vertical", command=self.src_listbox.yview)
+        src_vsb = make_tk_vscrollbar(src_wrap, command=self.src_listbox.yview)
         self.src_listbox.configure(yscrollcommand=src_vsb.set)
         self.src_listbox.grid(row=0, column=0, sticky="nsew")
         src_vsb.grid(row=0, column=1, sticky="ns")
@@ -986,7 +1085,7 @@ class NamingToolApp:
         dst_wrap.columnconfigure(0, weight=1)
         dst_wrap.rowconfigure(0, weight=1)
         self.dst_listbox = tk.Listbox(dst_wrap, height=8, exportselection=False, font=("Consolas", 10))
-        dst_vsb = ttk.Scrollbar(dst_wrap, orient="vertical", command=self.dst_listbox.yview)
+        dst_vsb = make_tk_vscrollbar(dst_wrap, command=self.dst_listbox.yview)
         self.dst_listbox.configure(yscrollcommand=dst_vsb.set)
         self.dst_listbox.grid(row=0, column=0, sticky="nsew")
         dst_vsb.grid(row=0, column=1, sticky="ns")
@@ -1717,7 +1816,10 @@ class NamingToolApp:
             self._update_legacy_strip_count()
             self.rename_source_var.set(cfg.get("rename_source", ""))
             self.rename_target_var.set(cfg.get("rename_target", ""))
-            self.rename_mode.set(cfg.get("rename_mode", "replace"))
+            mode = cfg.get("rename_mode", "click")
+            if mode == "replace":
+                mode = "click"
+            self.rename_mode.set(mode)
             self.scan_subfolders_var.set(bool(cfg.get("scan_subfolders", False)))
             if cfg.get("ui_theme"):
                 self.root._ui_theme = str(cfg["ui_theme"])  # noqa: SLF001
@@ -1816,13 +1918,9 @@ class NamingToolApp:
         keep_re = bool(self.legacy_keep_regex_var.get())
         strip_re = bool(self.legacy_strip_regex_var.get())
         if hasattr(self, "_legacy_keep_edit_btn"):
-            self._legacy_keep_edit_btn.configure(
-                text="编辑保留正则…" if keep_re else "编辑保留词",
-            )
+            self._legacy_keep_edit_btn.configure(text="编(正)" if keep_re else "编辑")
         if hasattr(self, "_legacy_strip_edit_btn"):
-            self._legacy_strip_edit_btn.configure(
-                text="编辑剔除正则…" if strip_re else "编辑剔除词",
-            )
+            self._legacy_strip_edit_btn.configure(text="编(正)" if strip_re else "编辑")
         if hasattr(self, "_legacy_keep_hint"):
             self._legacy_keep_hint.configure(
                 text="正则已开：点左侧按钮，在弹窗里每行写一条正则" if keep_re
@@ -1871,10 +1969,14 @@ class NamingToolApp:
         self._legacy_strip_count_var.set(f"{n} {mode}")
 
     def _update_legacy_strip_visibility(self) -> None:
+        frame = getattr(self, "_legacy_strip_frame", None)
+        if frame is None:
+            return
         if self.legacy_var.get():
-            self._legacy_strip_frame.pack(fill="x", pady=(4, 0))
+            if not frame.winfo_ismapped():
+                frame.pack(fill=tk.X)
         else:
-            self._legacy_strip_frame.pack_forget()
+            frame.pack_forget()
         self._sync_legacy_regex_ui()
 
     def _open_legacy_tag_editor(
@@ -2046,10 +2148,14 @@ class NamingToolApp:
         self._refresh_preview()
 
     def _update_legacy_batch_visibility(self) -> None:
+        frame = getattr(self, "_legacy_batch_frame", None)
+        if frame is None:
+            return
         if self.legacy_var.get():
-            self._legacy_batch_frame.grid()
+            if not frame.winfo_ismapped():
+                frame.pack(fill=tk.X, pady=(2, 0))
         else:
-            self._legacy_batch_frame.grid_remove()
+            frame.pack_forget()
 
     def _update_preview_select_ui(self) -> None:
         all_on = bool(self._preview_rows) and all(r.get("selected") for r in self._preview_rows)
@@ -2130,6 +2236,10 @@ class NamingToolApp:
             row["note"] = note
         return row["new"], row["note"]
 
+    def _preview_row_changed(self, row: dict[str, Any]) -> bool:
+        """仅手动改新文件名或规则微调后标绿（模板自动命名不算「已改」）。"""
+        return bool(row.get("manual_edit"))
+
     def _preview_row_display(self, row: dict[str, Any]) -> tuple[str, str, str, str]:
         sel = "☑" if row.get("selected") else "☐"
         return sel, row["old"], row["new"], row.get("note", "")
@@ -2181,6 +2291,8 @@ class NamingToolApp:
             return False
         row = self._preview_rows[idx]
         computed = row.get("computed_new", row["new"])
+        if val != row.get("new"):
+            self._history_push("手动改新文件名")
         row["new"] = val
         row["manual_edit"] = val != computed
         if refresh:
@@ -2348,7 +2460,7 @@ class NamingToolApp:
         for item in self.tree.get_children():
             self.tree.delete(item)
         for i, row in enumerate(self._preview_rows):
-            tags = ("manual_new",) if row.get("manual_edit") else ()
+            tags = ("manual_new",) if self._preview_row_changed(row) else ()
             self.tree.insert(
                 "", "end", iid=str(i), values=self._preview_row_display(row), tags=tags,
             )
@@ -2406,6 +2518,7 @@ class NamingToolApp:
         if not new_value:
             messagebox.showwarning("提示", "请填写新值")
             return
+        self._history_push("批量改字段")
         for row in selected:
             overrides = row.setdefault("overrides", {})
             overrides[field_key] = new_value
@@ -2413,43 +2526,267 @@ class NamingToolApp:
             # 批量改字段后允许模板重算覆盖旧的查找替换结果
             row["manual_edit"] = False
         self._rebuild_preview_rows()
+        self._refresh_history_list()
 
-    def _apply_preview_find_replace(self) -> None:
-        """对勾选行的新文件名做查找替换（支持 | 分隔多项）。"""
+    def _history_push(self, label: str) -> None:
+        if not self._preview_rows:
+            return
+        self._rename_history.push(self._preview_rows, label)
+        self._refresh_history_list()
+
+    def _refresh_history_list(self) -> None:
+        hint = getattr(self, "_history_hint_var", None)
+        if hint is None:
+            return
+        labels = self._rename_history.labels()
+        if not labels:
+            hint.set("Ctrl+Z 撤销")
+            return
+        hint.set(f"{len(labels)} 步 · 最近: {labels[-1][:24]}")
+
+    def _history_undo(self) -> None:
+        if not self._rename_history.can_undo():
+            self._set_status("没有可撤销的操作")
+            return
+        entry = self._rename_history.undo(self._preview_rows)
+        if entry is None:
+            return
+        from modules.rename_history import restore_preview_rows
+        restore_preview_rows(self._preview_rows, entry.rows)
+        self._fill_preview_tree()
+        self._refresh_history_list()
+        self._set_status(f"已撤销：{entry.label}")
+
+    def _history_redo(self) -> None:
+        if not self._rename_history.can_redo():
+            self._set_status("没有可重做的操作")
+            return
+        entry = self._rename_history.redo(self._preview_rows)
+        if entry is None:
+            return
+        from modules.rename_history import restore_preview_rows
+        restore_preview_rows(self._preview_rows, entry.rows)
+        self._fill_preview_tree()
+        self._refresh_history_list()
+        self._set_status("已重做一步")
+
+    def _meta_context_for_row(self, row: dict[str, Any], list_index: int) -> Any:
+        from modules.rename_meta import RenameMetaContext
+        try:
+            fields = self._get_fields()
+        except Exception:
+            fields = None
+        try:
+            digits = int(self.index_digits_var.get() or "2")
+        except ValueError:
+            digits = 2
+        return RenameMetaContext.from_row(
+            row,
+            list_index=list_index,
+            start_index=self._start_index(),
+            index_digits=digits,
+            date=(self.date_var.get() or "").strip(),
+            folder=(self.folder_var.get() or "").strip(),
+            fields=fields,
+        )
+
+    def _preview_rename_rules(self) -> None:
+        """F9：按六块规则链预览勾选行的新文件名。"""
+        self._apply_rename_chain(preview_only=True)
+
+    def _apply_rename_chain_live(self) -> None:
+        """规则参数变化时静默刷新预览（由规则面板防抖调用）。"""
+        self._apply_rename_chain(preview_only=True, silent=True)
+
+    def _apply_rename_chain(self, *, preview_only: bool = False, silent: bool = False) -> None:
+        blocks = getattr(self, "_rename_blocks", None)
+        if blocks is None:
+            return
+        if not self._preview_rows:
+            return
+        try:
+            digits = int(self.index_digits_var.get() or "2")
+        except ValueError:
+            digits = 2
+        chain = blocks.get_chain(start=self._start_index(), digits=digits)
         selected = [r for r in self._preview_rows if r.get("selected")]
         if not selected:
-            messagebox.showwarning("请先勾选文件", "请先在预览表格中勾选至少一个文件")
+            if not silent:
+                messagebox.showwarning("请先勾选文件", "请先在预览表格中勾选至少一个文件", parent=self.root)
             return
-        find_raw = (self.preview_find_var.get() or "").strip()
-        if not find_raw:
-            messagebox.showwarning("提示", "请填写查找内容")
+
+        fields = self._get_fields()
+        lib = self._full_tag_library()
+        start = self._start_index()
+        kw = self._filename_kwargs()
+
+        def _reset_selected_baseline() -> None:
+            for row in selected:
+                row["manual_edit"] = False
+                try:
+                    list_index = self._preview_rows.index(row)
+                except ValueError:
+                    list_index = 0
+                self._merge_preview_row(row, fields, start + list_index, lib, kw)
+
+        if not chain.any_active():
+            if silent:
+                _reset_selected_baseline()
+                self._fill_preview_tree()
+            elif not preview_only:
+                messagebox.showinfo("提示", "请至少在一个方块中选择非「保持不变」的模式", parent=self.root)
             return
-        repl_raw = self.preview_replace_var.get() or ""
-        finds = [p for p in find_raw.split("|") if p != ""]
-        repls = repl_raw.split("|")
-        if not finds:
-            messagebox.showwarning("提示", "请填写查找内容")
-            return
+
+        if silent:
+            _reset_selected_baseline()
+
+        if not silent:
+            self._history_push("规则链预览" if preview_only else "规则链应用")
         changed = 0
         for row in selected:
-            name = str(row.get("new") or "")
+            try:
+                list_index = self._preview_rows.index(row)
+            except ValueError:
+                list_index = 0
+            name = str(row.get("new") or row.get("old") or "")
             if not name:
                 continue
-            stem, ext = os.path.splitext(name)
-            new_stem = stem
-            for i, f in enumerate(finds):
-                r = repls[i] if i < len(repls) else (repls[-1] if repls else "")
-                if f in new_stem:
-                    new_stem = new_stem.replace(f, r)
-            new_name = new_stem + ext
+            meta_ctx = self._meta_context_for_row(row, list_index)
+            sel_i = selected.index(row)
+            new_name = chain.apply_to_filename(name, file_index=sel_i, meta_ctx=meta_ctx)
             if new_name != name:
                 row["new"] = new_name
                 row["manual_edit"] = True
                 changed += 1
         self._fill_preview_tree()
-        self._set_status(f"查找替换完成：{changed}/{len(selected)} 个选中项已改新名（可继续改，或点「解除锁定」重算）")
-        if changed == 0:
-            messagebox.showinfo("查找替换", "选中项中没有匹配到查找内容", parent=self.root)
+        if silent:
+            if changed:
+                n_sel = len(selected)
+                self._set_preview_status(f"规则预览：{changed}/{n_sel} 项已更新")
+            return
+        self._refresh_history_list()
+        msg = f"规则预览：{changed}/{len(selected)} 项已更新" if changed else f"规则预览：{len(selected)} 项（名称无变化）"
+        self._set_status(msg)
+
+    def _apply_rename_rule_to_selected(self, rule_kind: str, **kwargs) -> None:
+        """兼容旧入口。"""
+        self._apply_rename_chain()
+
+    def _apply_rule_add(self) -> None:
+        self._apply_rename_chain()
+
+    def _apply_rule_replace(self) -> None:
+        self._apply_rename_chain()
+
+    def _apply_rule_delete(self) -> None:
+        self._apply_rename_chain()
+
+    def _apply_preview_find_replace(self) -> None:
+        self._apply_rename_chain()
+
+    def _on_naming_paths_dropped(self, paths: list[str]) -> None:
+        files: list[str] = []
+        dirs: list[str] = []
+        for p in paths:
+            if os.path.isfile(p):
+                ext = Path(p).suffix.lower()
+                if ext in MEDIA_EXTS_TUPLE or ext in {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".webm", ".jpg", ".jpeg", ".png"}:
+                    files.append(os.path.normpath(p))
+            elif os.path.isdir(p):
+                dirs.append(os.path.normpath(p))
+        if dirs:
+            self.folder_var.set(dirs[0])
+            self._schedule_save()
+            self._refresh_preview(notify=False)
+            self._toast(f"已设路径并扫描：{dirs[0]}")
+        if files:
+            folder = (self.folder_var.get() or "").strip()
+            parents = {str(Path(f).parent) for f in files}
+            norm_folder = os.path.normpath(folder) if folder else ""
+            if not folder:
+                self.folder_var.set(str(Path(files[0]).parent))
+                self._schedule_save()
+            elif len(parents) == 1:
+                only_parent = next(iter(parents))
+                if os.path.normcase(only_parent) != os.path.normcase(norm_folder):
+                    self._toast(f"已加入 {len(files)} 个外部文件（不在当前路径，执行时仍从原位置改名）")
+                else:
+                    self._toast(f"已加入 {len(files)} 个文件")
+            else:
+                self._toast(f"已加入 {len(files)} 个文件（来自多个文件夹，均保留各自原路径）")
+            self._add_dropped_files_to_preview(files)
+
+    def _add_dropped_files_to_preview(self, file_paths: list[str]) -> None:
+        """把拖入的单个/多个文件追加进预览列表（可来自当前路径外）。"""
+        if middle_has_error(self.middle_var.get()):
+            return
+        try:
+            fields = self._get_fields()
+            lib = self._full_tag_library()
+            start = self._start_index() + len(self._preview_rows)
+            kw = self._filename_kwargs()
+        except Exception:
+            return
+        folder = (self.folder_var.get() or "").strip()
+        norm_folder = os.path.normcase(os.path.normpath(folder)) if folder else ""
+        existing = {(str(r.get("old")), str(r.get("full_path") or "")) for r in self._preview_rows}
+        added = 0
+        for i, full in enumerate(file_paths):
+            full = os.path.normpath(full)
+            fname = os.path.basename(full)
+            parent = os.path.normcase(str(Path(full).parent))
+            key = (fname, full)
+            if key in existing or (fname, "") in existing and parent == norm_folder:
+                continue
+            idx = start + added
+            if parent != norm_folder:
+                loc = Path(full).parent.name or str(Path(full).parent)
+                note = f"外部 · {loc}"
+            else:
+                note = "拖入"
+            row: dict[str, Any] = {
+                "old": fname,
+                "new": fname,
+                "computed_new": fname,
+                "note": note,
+                "selected": True,
+                "overrides": {},
+                "legacy_priority": False,
+                "manual_edit": False,
+                "parsed": None,
+                "full_path": full,
+            }
+            try:
+                if self.legacy_var.get():
+                    parsed = parse_legacy_filename(fname, lib)
+                    row["parsed"] = parsed
+                    new_name, warns, _ = merge_legacy_with_fields(
+                        parsed, fields, idx, lib, **self._legacy_merge_kwargs(),
+                    )
+                    row["note"] = "; ".join(warns) or "拖入文件"
+                else:
+                    new_name, date_ok = build_filename(
+                        fields, idx, source_ext=source_ext_from_filename(fname), **kw,
+                    )
+                    if not date_ok:
+                        row["note"] = "日期异常"
+                row["computed_new"] = new_name
+                row["new"] = new_name
+            except ValueError as e:
+                row["note"] = str(e)
+            self._preview_rows.append(row)
+            existing.add(fname)
+            added += 1
+        if added:
+            self._fill_preview_tree()
+            n_sel = sum(1 for r in self._preview_rows if r.get("selected"))
+            self._set_preview_status(f"共 {len(self._preview_rows)} 个文件 · 已勾选 {n_sel} 个（含拖入 {added} 个）")
+
+    def _toast(self, msg: str) -> None:
+        try:
+            self._set_status(msg)
+        except Exception:
+            pass
 
     def _unlock_preview_manual_selected(self) -> None:
         """清除选中行的手动锁定，按当前模板/字段重新计算新名。"""
@@ -2457,9 +2794,11 @@ class NamingToolApp:
         if not selected:
             messagebox.showwarning("请先勾选文件", "请先勾选要解除锁定的文件", parent=self.root)
             return
+        self._history_push("解除锁定并重算")
         for row in selected:
             row["manual_edit"] = False
         self._rebuild_preview_rows()
+        self._refresh_history_list()
         self._set_status(f"已解除锁定并重算：{len(selected)} 项")
 
     def _browse_folder(self) -> None:
@@ -2646,7 +2985,9 @@ class NamingToolApp:
         root = Path(folder)
         ok = fail = 0
         for row in to_rename:
-            src, dst = root / row["old"], root / row["new"]
+            src_path = row.get("full_path") or str(root / row["old"])
+            src = Path(src_path)
+            dst = src.parent / row["new"]
             if dst.exists():
                 fail += 1
                 continue
@@ -2719,9 +3060,11 @@ class NamingToolApp:
         lb = getattr(self, "src_listbox", None)
         if lb is None or idx < 0 or idx >= len(self._src_files):
             return
+        from modules.platform_utils import ui_ok_prefix
+
         name = self._src_files[idx]
         if idx in self._rename_done_src:
-            display, fg, bg = f"✅ {name}", "gray", "#f0f0f0"
+            display, fg, bg = f"{ui_ok_prefix()}{name}", "gray", "#f0f0f0"
         elif idx == self._rename_copied_idx:
             display, fg, bg = name, "black", "#cce5ff"
         else:
@@ -2839,7 +3182,7 @@ class NamingToolApp:
             messagebox.showwarning("提示", "请选择目标文件夹")
             return
         if self.rename_mode.get() != "append":
-            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n查找替换模式请使用单击复制/粘贴。")
+            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n点击替换请使用左栏复制、右栏粘贴。")
             return
         suffix = simpledialog.askstring("批量附加重命名", "追加到所有文件名末尾的内容:", parent=self.root)
         if not suffix:

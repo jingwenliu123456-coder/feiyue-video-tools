@@ -3,11 +3,31 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+
+_FFMPEG_TIME_RE = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def _drain_stderr(pipe, chunks: list[str]) -> None:
+    try:
+        if pipe is None:
+            return
+        for line in iter(pipe.readline, ""):
+            chunks.append(line)
+    except Exception:
+        pass
+    finally:
+        try:
+            if pipe is not None:
+                pipe.close()
+        except Exception:
+            pass
 
 _MEDIA_OUTPUT_EXTS = {
     ".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".wmv", ".flv",
@@ -258,6 +278,8 @@ def run_ffmpeg_safe(
     validate_output: bool = False,
     use_temp_output: bool = True,
     creationflags: Optional[int] = None,
+    poll_cb=None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> tuple[bool, str]:
     """
     执行 FFmpeg。
@@ -282,16 +304,88 @@ def run_ffmpeg_safe(
             cmd = cmd[:idx] + [temp_path] + cmd[idx + 1 :]
 
     flags = creationflags if creationflags is not None else _subprocess_flags()
+    use_poll = callable(poll_cb)
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            creationflags=flags,
-        )
+        if use_poll:
+            from core.batch_control import resume_process, suspend_process, terminate_process
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=flags,
+            )
+            stderr_chunks: list[str] = []
+            reader = threading.Thread(
+                target=_drain_stderr, args=(proc.stderr, stderr_chunks), daemon=True,
+            )
+            reader.start()
+            proc.stderr = None
+
+            suspended = False
+            stopped = False
+            last_progress_at = 0.0
+            while proc.poll() is None:
+                action = poll_cb() if poll_cb else "continue"
+                if action == "stop":
+                    terminate_process(proc)
+                    stopped = True
+                    break
+                if action == "pause":
+                    if not suspended:
+                        suspended = suspend_process(proc.pid)
+                    while poll_cb() == "pause":
+                        if poll_cb() == "stop":
+                            terminate_process(proc)
+                            stopped = True
+                            break
+                        time.sleep(0.2)
+                    if stopped:
+                        break
+                    if suspended:
+                        resume_process(proc.pid)
+                        suspended = False
+                    continue
+                if suspended:
+                    resume_process(proc.pid)
+                    suspended = False
+                if progress_cb and stderr_chunks:
+                    now = time.time()
+                    if now - last_progress_at >= 3.0:
+                        tail = "".join(stderr_chunks[-8:])
+                        m = None
+                        for m in _FFMPEG_TIME_RE.finditer(tail):
+                            pass
+                        if m is not None:
+                            last_progress_at = now
+                            try:
+                                progress_cb(m.group(0))
+                            except Exception:
+                                pass
+                time.sleep(0.12)
+            reader.join(timeout=10)
+            proc.wait(timeout=30)
+            stderr = "".join(stderr_chunks)
+            result = subprocess.CompletedProcess(cmd, proc.returncode if not stopped else -1, "", stderr)
+            if stopped:
+                _cleanup(temp_path)
+                msg = "用户已停止"
+                if raise_on_fail:
+                    raise RuntimeError(msg)
+                return False, msg
+        else:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=flags,
+            )
     except Exception as e:
         _cleanup(temp_path)
         if raise_on_fail:

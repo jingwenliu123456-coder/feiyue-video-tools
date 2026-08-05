@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
-"""文件夹拖放（Windows 原生 / windnd / tkinterdnd2；失败时仍可用点击添加）。"""
+"""文件夹拖放（Windows：仅 windnd / tkinterdnd2；禁用 ctypes 防闪退）。"""
 
 from __future__ import annotations
 
 import os
 import sys
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-# 避免同一 HWND 重复挂接
-_HOOKED_HWNDS: set[int] = set()
 _HOOKED_WIDGETS: set[int] = set()
+_LAST_BACKEND: str = ""
+
+
+def drop_backend_name() -> str:
+    return _LAST_BACKEND or "none"
 
 
 def normalize_drop_paths(files: Any) -> list[str]:
@@ -43,107 +47,34 @@ def only_existing_dirs(paths: list[str]) -> list[str]:
         if os.path.isdir(p):
             dirs.append(p)
             continue
-        # 拖入的是文件 → 用其所在文件夹
         parent = str(Path(p).parent) if p else ""
         if parent and os.path.isdir(parent) and parent not in dirs:
             dirs.append(parent)
     return dirs
 
 
+def _log_drop_error(exc: BaseException) -> None:
+    try:
+        print(f"[folder_drop] {exc}", file=sys.stderr)
+        traceback.print_exc()
+    except Exception:
+        pass
+
+
 def _hook_windnd(widget: Any, emit: Callable[[Any], None]) -> bool:
+    global _LAST_BACKEND
     try:
         import windnd  # type: ignore
 
         windnd.hook_dropfiles(widget, func=emit)
-        return True
-    except Exception:
-        return False
-
-
-def _hook_win_dropfiles_ctypes(widget: Any, emit: Callable[[Any], None]) -> bool:
-    """不依赖第三方库的 Windows 拖放（WM_DROPFILES）。"""
-    if not sys.platform.startswith("win"):
-        return False
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except Exception:
-        return False
-
-    try:
-        hwnd = int(widget.winfo_id())
-    except Exception:
-        return False
-    if hwnd in _HOOKED_HWNDS:
-        return True
-
-    try:
-        shell32 = ctypes.windll.shell32
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-    except Exception:
-        return False
-
-    WM_DROPFILES = 0x0233
-    GWL_WNDPROC = -4
-    if ctypes.sizeof(ctypes.c_void_p) == 8:
-        GetWindowLong = user32.GetWindowLongPtrW
-        SetWindowLong = user32.SetWindowLongPtrW
-        WNDPROC_T = ctypes.WINFUNCTYPE(
-            ctypes.c_longlong, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-        )
-    else:
-        GetWindowLong = user32.GetWindowLongW
-        SetWindowLong = user32.SetWindowLongW
-        WNDPROC_T = ctypes.WINFUNCTYPE(
-            ctypes.c_long, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
-        )
-
-    try:
-        shell32.DragAcceptFiles(hwnd, True)
-        old_proc = GetWindowLong(hwnd, GWL_WNDPROC)
-        if not old_proc:
-            return False
-    except Exception:
-        return False
-
-    def _on_drop(hdrop) -> None:
-        try:
-            count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
-            paths: list[str] = []
-            buf = ctypes.create_unicode_buffer(1024)
-            for i in range(int(count)):
-                shell32.DragQueryFileW(hdrop, i, buf, 1024)
-                if buf.value:
-                    paths.append(buf.value)
-            shell32.DragFinish(hdrop)
-            if paths:
-                emit(paths)
-        except Exception:
-            try:
-                shell32.DragFinish(hdrop)
-            except Exception:
-                pass
-
-    def _wndproc(h, msg, wparam, lparam):
-        if msg == WM_DROPFILES:
-            _on_drop(wparam)
-            return 0
-        return user32.CallWindowProcW(old_proc, h, msg, wparam, lparam)
-
-    # 必须保持引用，否则 GC 后会崩溃
-    new_proc = WNDPROC_T(_wndproc)
-    widget._habi_drop_wndproc = new_proc  # noqa: SLF001
-    widget._habi_drop_oldproc = old_proc  # noqa: SLF001
-    try:
-        SetWindowLong(hwnd, GWL_WNDPROC, new_proc)
-        _HOOKED_HWNDS.add(hwnd)
+        _LAST_BACKEND = "windnd"
         return True
     except Exception:
         return False
 
 
 def _hook_tkdnd(widget: Any, emit: Callable[[Any], None]) -> bool:
+    global _LAST_BACKEND
     try:
         from tkinterdnd2 import DND_FILES  # type: ignore
 
@@ -153,30 +84,71 @@ def _hook_tkdnd(widget: Any, emit: Callable[[Any], None]) -> bool:
 
         widget.drop_target_register(DND_FILES)
         widget.dnd_bind("<<Drop>>", _tkdnd)
+        _LAST_BACKEND = "tkinterdnd2"
         return True
     except Exception:
         return False
 
 
-def hook_folder_drop(widget: Any, on_folders: Callable[[list[str]], None]) -> bool:
-    """给控件挂文件夹拖放。成功返回 True。
+def _defer_emit(widget: Any, emit: Callable[[Any], None], raw: Any) -> None:
+    """拖放回调延后到主循环，避免在原生消息处理栈里改 UI 导致闪退。"""
+    def _run() -> None:
+        try:
+            emit(raw)
+        except Exception as exc:
+            _log_drop_error(exc)
 
-    优先级：windnd → Windows 原生 WM_DROPFILES → tkinterdnd2。
-    """
+    try:
+        root = widget.winfo_toplevel()
+        # after(1) 比 after(0) 更稳：等当前消息栈完全退出
+        root.after(1, _run)
+    except Exception:
+        try:
+            _run()
+        except Exception as exc:
+            _log_drop_error(exc)
+
+
+def _hook_path_drop_impl(widget: Any, emit: Callable[[Any], None]) -> bool:
+    global _LAST_BACKEND
     wid = id(widget)
     if wid in _HOOKED_WIDGETS:
         return True
+
+    def _safe_emit(raw: Any) -> None:
+        _defer_emit(widget, emit, raw)
+
+    ok = False
+    if sys.platform.startswith("win"):
+        ok = _hook_windnd(widget, _safe_emit)
+    if not ok:
+        ok = _hook_tkdnd(widget, _safe_emit)
+    #  deliberately skip ctypes WM_DROPFILES — crashes Tk on many Windows/Python builds
+
+    if ok:
+        _HOOKED_WIDGETS.add(wid)
+    else:
+        _LAST_BACKEND = "none"
+    return ok
+
+
+def hook_folder_drop(widget: Any, on_folders: Callable[[list[str]], None]) -> bool:
+    """给控件挂文件夹拖放。成功返回 True。"""
 
     def _emit(raw: Any) -> None:
         dirs = only_existing_dirs(normalize_drop_paths(raw))
         if dirs:
             on_folders(dirs)
 
-    ok = False
-    if sys.platform.startswith("win"):
-        ok = _hook_windnd(widget, _emit) or _hook_win_dropfiles_ctypes(widget, _emit)
-    if not ok:
-        ok = _hook_tkdnd(widget, _emit)
-    if ok:
-        _HOOKED_WIDGETS.add(wid)
-    return ok
+    return _hook_path_drop_impl(widget, _emit)
+
+
+def hook_path_drop(widget: Any, on_paths: Callable[[list[str]], None]) -> bool:
+    """挂拖放：回调收到规范化后的文件/文件夹路径列表。"""
+
+    def _emit(raw: Any) -> None:
+        paths = [p for p in normalize_drop_paths(raw) if p and (os.path.isfile(p) or os.path.isdir(p))]
+        if paths:
+            on_paths(paths)
+
+    return _hook_path_drop_impl(widget, _emit)

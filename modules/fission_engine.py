@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import copy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -14,7 +15,6 @@ FISSION_SCHEMA_VERSION = 1
 # 裂变功能键 → 批处理流水线步骤键（与 VideoBatchToolV21._BATCH_PIPELINE_DEFAULT 对齐）
 ENABLE_KEY_TO_STEP: dict[str, str] = {
     "cut_enable": "cut",
-    "enhance_enable": "enhance",
     "ratio_enable": "ratio",
     "enable_mov_watermark": "mov_wm",
     "png_wm_enable": "png_wm",
@@ -25,7 +25,7 @@ ENABLE_KEY_TO_STEP: dict[str, str] = {
 }
 
 _DEFAULT_PIPELINE_STEPS: tuple[str, ...] = (
-    "cut", "enhance", "ratio", "mov_wm", "png_wm", "layer", "ending", "overlay",
+    "cut", "ratio", "mov_wm", "png_wm", "layer", "ending", "overlay",
 )
 
 
@@ -98,7 +98,9 @@ class FissionSourceGroup:
     preprocess_template: str = ""
     preprocess_temp_mode: str = "自动清理"  # 自动清理 | 保留 | 指定路径
     preprocess_temp_path: str = ""
-    # 勾选的方案名（对应 FissionPlan.branches[].branch_name）；空=用全部已启用方案
+    # 勾选的方案名（对应 FissionPlan.branches[].branch_name）
+    # 多源：显式列表；空列表表示本组未勾选任何方案
+    # 单源/兼容：resolve 时 empty_means_all=True 仍视为「全部已启用方案」
     selected_branch_names: list[str] = field(default_factory=list)
 
     def display_title(self) -> str:
@@ -156,15 +158,59 @@ def source_group_from_dict(d: dict[str, Any]) -> FissionSourceGroup:
 def resolve_group_branches(
     group: FissionSourceGroup,
     plan_branches: list[FissionBranch],
+    *,
+    empty_means_all: bool = False,
 ) -> list[FissionBranch]:
-    """按组勾选筛方案；未勾选任何名称时用计划里全部已启用方案。"""
+    """按组勾选筛方案。
+
+    empty_means_all=True（单源默认）：未勾选任何名称时用全部已启用方案。
+    empty_means_all=False（多源）：未勾选任何名称时返回空列表。
+    """
     enabled = [b for b in plan_branches if b.enabled and sanitize_branch_name(b.branch_name)]
     names = [sanitize_branch_name(n) for n in (group.selected_branch_names or []) if str(n).strip()]
     if not names:
-        return list(enabled)
+        return list(enabled) if empty_means_all else []
     want = set(names)
     picked = [b for b in enabled if sanitize_branch_name(b.branch_name) in want]
     return picked
+
+
+def explicit_branch_selection(
+    selected: list[str] | None,
+    all_branch_names: list[str],
+    *,
+    legacy_empty_means_all: bool = True,
+) -> list[str]:
+    """把组内方案勾选规范为显式名称列表（用于 UI 重建 checkbox）。"""
+    valid = {sanitize_branch_name(n) for n in all_branch_names if str(n).strip()}
+    names = [sanitize_branch_name(n) for n in (selected or []) if str(n).strip()]
+    names = [n for n in names if n in valid]
+    if names:
+        return names
+    if legacy_empty_means_all and valid:
+        return [sanitize_branch_name(n) for n in all_branch_names if sanitize_branch_name(n) in valid]
+    return []
+
+
+def merge_branch_selection_after_plan_change(
+    old_selected: list[str],
+    old_branch_names: list[str],
+    new_branch_names: list[str],
+) -> list[str]:
+    """方案库变更后：保留仍存在的勾选，新方案默认不勾。"""
+    old_set = {sanitize_branch_name(n) for n in old_branch_names if str(n).strip()}
+    new_valid = {sanitize_branch_name(n) for n in new_branch_names if str(n).strip()}
+    picked = [
+        sanitize_branch_name(n)
+        for n in (old_selected or [])
+        if sanitize_branch_name(n) in new_valid
+    ]
+    if picked:
+        return picked
+    # 旧数据「空=全选」迁移：若旧库非空且旧勾选为空，视为曾全选 → 只保留旧库方案在新库中的交集
+    if not (old_selected or []) and old_set:
+        return sorted(old_set & new_valid)
+    return []
 
 
 @dataclass
@@ -244,9 +290,9 @@ def resolve_branch_config(
     *,
     templates_dir: Path,
 ) -> dict[str, Any]:
-    """返回该分支要应用的完整配置 dict。"""
+    """返回该分支要应用的完整配置 dict（深拷贝，避免多方案共享同一 dict）。"""
     if branch.embedded_config and isinstance(branch.embedded_config, dict):
-        return dict(branch.embedded_config)
+        return copy.deepcopy(branch.embedded_config)
     name = (branch.template_name or "").strip()
     if not name:
         raise ValueError(f"分支「{branch.branch_name}」未绑定模板，也无自建快照")
@@ -256,7 +302,7 @@ def resolve_branch_config(
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise TypeError(f"方案模板格式无效: {path.name}")
-    return data
+    return copy.deepcopy(data)
 
 
 def bind_fission_io_paths(cfg: dict[str, Any], *, in_path: str, out_path: str) -> dict[str, Any]:

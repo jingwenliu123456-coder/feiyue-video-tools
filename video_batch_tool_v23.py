@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import os
 import threading
 from pathlib import Path
@@ -53,6 +54,14 @@ class VideoBatchToolV23(_V22):
             self.root.title(APP_TITLE)
         except Exception:
             pass
+
+    def _on_templates_catalog_changed(self) -> None:
+        panel = getattr(self, "_fission_panel", None)
+        if panel is not None and hasattr(panel, "refresh_template_catalog"):
+            try:
+                panel.refresh_template_catalog()
+            except Exception:
+                pass
 
     def build_ui(self):
         self.main_frame.columnconfigure(0, weight=1, uniform="main_col")
@@ -221,9 +230,8 @@ class VideoBatchToolV23(_V22):
         bn = sanitize_branch_name(bn or "")
         if not bn:
             return
-        cfg = self._current_config_dict()
+        cfg = copy.deepcopy(self._current_config_dict())
         # 不把输入输出写死进分支快照（执行时强制覆盖）
-        cfg = dict(cfg)
         cfg["global_input"] = ""
         cfg["global_output"] = ""
         self._fission_plan.branches.append(
@@ -281,8 +289,7 @@ class VideoBatchToolV23(_V22):
         def refresh_snapshot():
             if not messagebox.askyesno("确认", "用当前界面配置覆盖该分支的自建快照？", parent=win):
                 return
-            cfg = self._current_config_dict()
-            cfg = dict(cfg)
+            cfg = copy.deepcopy(self._current_config_dict())
             cfg["global_input"] = ""
             cfg["global_output"] = ""
             b.embedded_config = cfg
@@ -352,6 +359,11 @@ class VideoBatchToolV23(_V22):
         try:
             save_fission_plan(path, self._fission_plan)
             self.log(f"裂变方案已保存: {path}")
+            try:
+                from modules import habi_memory
+                habi_memory.remember_fission_plan(Path(path).stem)
+            except Exception:
+                pass
             messagebox.showinfo("完成", f"已保存：\n{path}", parent=self.root)
         except Exception as e:
             messagebox.showerror("错误", str(e), parent=self.root)
@@ -373,11 +385,22 @@ class VideoBatchToolV23(_V22):
             self.fission_plan_name_var.set(plan.name)
             self._fission_refresh_tree()
             panel = getattr(self, "_fission_panel", None)
-            if panel is not None and hasattr(panel, "_rebuild_source_group_cards"):
-                try:
-                    panel._rebuild_source_group_cards()
-                except Exception:
-                    pass
+            if panel is not None:
+                if hasattr(panel, "on_plan_loaded"):
+                    try:
+                        panel.on_plan_loaded()
+                    except Exception:
+                        pass
+                elif hasattr(panel, "_rebuild_source_group_cards"):
+                    try:
+                        panel._rebuild_source_group_cards()
+                    except Exception:
+                        pass
+            try:
+                from modules import habi_memory
+                habi_memory.remember_fission_plan(Path(path).stem)
+            except Exception:
+                pass
             self.log(f"已加载裂变方案: {path}")
         except Exception as e:
             messagebox.showerror("错误", str(e), parent=self.root)
@@ -399,6 +422,11 @@ class VideoBatchToolV23(_V22):
             return
 
         panel = getattr(self, "_fission_panel", None)
+        if panel is not None and hasattr(panel, "refresh_template_catalog"):
+            try:
+                panel.refresh_template_catalog()
+            except Exception:
+                pass
         if panel is not None and hasattr(panel, "sync_groups_to_plan"):
             try:
                 panel.sync_groups_to_plan()
@@ -435,6 +463,10 @@ class VideoBatchToolV23(_V22):
                 )
             ]
 
+        panel = getattr(self, "_fission_panel", None)
+        io_mode = getattr(getattr(panel, "_io_mode", None), "get", lambda: "单源")()
+        single_source = io_mode != "多源"
+
         problems: list[str] = []
         runnable: list[tuple[FissionSourceGroup, list[FissionBranch]]] = []
         for g in groups:
@@ -443,7 +475,10 @@ class VideoBatchToolV23(_V22):
             if not in_dir or not os.path.isdir(in_dir):
                 problems.append(f"「{title}」：输入文件夹无效")
                 continue
-            brs = resolve_group_branches(g, self._fission_plan.branches)
+            brs = resolve_group_branches(
+                g, self._fission_plan.branches,
+                empty_means_all=single_source,
+            )
             if not brs:
                 problems.append(f"「{title}」：未勾选任何裂变方案")
                 continue
@@ -462,6 +497,25 @@ class VideoBatchToolV23(_V22):
             if not out:
                 problems.append(f"「{title}」：未设置输出目录（组内或全局输出根）")
                 continue
+            if g.preprocess_enable:
+                try:
+                    pp_dir = self._resolve_preprocess_temp_dir(
+                        out,
+                        {
+                            "temp_mode": g.preprocess_temp_mode,
+                            "temp_path": g.preprocess_temp_path,
+                            "template": g.preprocess_template,
+                        },
+                        group_key=title,
+                    )
+                    if os.path.normcase(os.path.abspath(pp_dir)) == os.path.normcase(os.path.abspath(in_dir)):
+                        problems.append(
+                            f"「{title}」：预处理成品目录不能与素材文件夹相同（会清空源视频）"
+                        )
+                        continue
+                except Exception as e:
+                    problems.append(f"「{title}」：预处理目录无效 — {e}")
+                    continue
             runnable.append((g, brs))
 
         if problems:
@@ -479,17 +533,35 @@ class VideoBatchToolV23(_V22):
         for g, brs in runnable:
             pp = f"预处理「{g.preprocess_template}」→ " if g.preprocess_enable else ""
             names = "、".join(b.branch_name for b in brs)
+            in_dir = (g.input_folder or "").strip()
+            out = (g.output_folder or "").strip() or (self.global_output_folder.get() or "").strip()
             lines.append(f"· {g.display_title()}：{pp}{names}")
+            lines.append(f"    输入: {in_dir}")
+            lines.append(f"    输出根: {out}")
+            if g.preprocess_enable:
+                try:
+                    pp_dir = self._resolve_preprocess_temp_dir(
+                        out,
+                        {
+                            "temp_mode": g.preprocess_temp_mode,
+                            "temp_path": g.preprocess_temp_path,
+                            "template": g.preprocess_template,
+                        },
+                        group_key=g.display_title(),
+                    )
+                    lines.append(f"    预处理成品: {pp_dir}")
+                except Exception:
+                    pass
         if not messagebox.askyesno(
             "开始批量裂变",
             f"共 {len(runnable)} 个源素材组（组间串行）。\n\n"
             + "\n".join(lines)
-            + "\n\n开始？",
+            + "\n\n请确认路径无误后再开始。",
             parent=self.root,
         ):
             return
 
-        snapshot = self._current_config_dict()
+        snapshot = copy.deepcopy(self._current_config_dict())
         from modules.fission_engine import branch_to_dict, source_group_to_dict
 
         payload = [
@@ -539,9 +611,26 @@ class VideoBatchToolV23(_V22):
         self._ui_batch_quiet = True  # 整段裂变期间抑制侧栏/时间轴刷新
         self._fission_phase_label = ""
         self._fission_preprocess_outputs = []
+        ctl = getattr(self, "_batch_ctl", None)
+        if ctl is not None:
+            ctl.begin()
         templates_dir = v20._templates_dir()
         last_out = (self.global_output_folder.get() or "").strip()
         n_branch_total = 0
+        panel = getattr(self, "_fission_panel", None)
+
+        def _ui_run_progress(**kw) -> None:
+            if panel is not None and hasattr(panel, "set_run_progress"):
+                self.root.after(0, lambda k=kw: panel.set_run_progress(**k))
+
+        def _ui_clear_run_progress() -> None:
+            if panel is not None and hasattr(panel, "clear_run_progress"):
+                self.root.after(0, panel.clear_run_progress)
+
+        try:
+            _ui_clear_run_progress()
+        except Exception:
+            pass
 
         def _apply_on_ui(cfg: dict, *, in_path: str, out_path: str) -> None:
             done = threading.Event()
@@ -589,7 +678,13 @@ class VideoBatchToolV23(_V22):
 
         try:
             self.log(f"\n======== 批量裂变开始 | 源素材组={len(payload)}（串行）========")
+            self.log("快捷键：空格=暂停/继续 · Esc=停止")
+            fission_stopped = False
             for gi, (gdict, br_dicts) in enumerate(payload, 1):
+                if ctl is not None and (ctl.should_stop or ctl.wait_if_paused()):
+                    self.log("用户停止裂变")
+                    fission_stopped = True
+                    break
                 g = source_group_from_dict(gdict)
                 branches = [branch_from_dict(x) for x in br_dicts]
                 title = g.display_title()
@@ -600,6 +695,7 @@ class VideoBatchToolV23(_V22):
                 self.log(f"\n######## [{gi}/{len(payload)}] 源组「{title}」########")
                 self.log(f"输入: {in_dir}")
                 self.log(f"输出根: {out_root}")
+                _ui_run_progress(phase=f"源组 {gi}/{len(payload)} · {title}", file_name="", percent=0.0)
 
                 work_in = in_dir
                 temp_dir = None
@@ -626,6 +722,7 @@ class VideoBatchToolV23(_V22):
                     self._fission_phase_label = f"预处理·{tpl_name}"
                     _ui_status(f"预处理「{tpl_name}」…")
                     _ui_progress(pp_label, 5, "预处理开始")
+                    _ui_run_progress(phase=f"预处理 · {tpl_name}", percent=5.0, label="准备中")
                     self.log(f"----- 第1级预处理「{tpl_name}」→ {temp_dir} -----")
                     try:
                         pp_cfg = resolve_branch_config(
@@ -663,12 +760,26 @@ class VideoBatchToolV23(_V22):
                         continue
 
                 for bi, branch in enumerate(branches, 1):
+                    if ctl is not None and (ctl.should_stop or ctl.wait_if_paused()):
+                        self.log("用户停止裂变")
+                        fission_stopped = True
+                        break
                     bname = sanitize_branch_name(branch.branch_name)
                     out_dir = os.path.join(out_root, bname)
                     os.makedirs(out_dir, exist_ok=True)
                     self._fission_phase_label = f"方案·{bname}"
                     _ui_status(f"方案「{bname}」({bi}/{len(branches)})…")
                     _ui_progress(bname, 5, "开始")
+                    n_files = len(_list_out_videos(work_in)) if work_in else 0
+                    self._fission_batch_file_total = n_files
+                    _ui_run_progress(
+                        phase=f"方案 {bi}/{len(branches)} · {bname}",
+                        file_name="",
+                        file_idx=0,
+                        file_total=max(n_files, 1),
+                        percent=5.0,
+                        label="开始",
+                    )
                     self.log(f"----- [{bi}/{len(branches)}] 方案 {bname} ({branch.display_source()}) -----")
                     try:
                         cfg = resolve_branch_config(branch, templates_dir=templates_dir)
@@ -683,6 +794,9 @@ class VideoBatchToolV23(_V22):
                         _ui_progress(bname, 0, "失败")
                     self._processing = True
                     self.log(f"  完成 → {out_dir}")
+
+                if fission_stopped:
+                    break
 
                 if should_cleanup and temp_dir and os.path.isdir(temp_dir):
                     try:
@@ -703,6 +817,7 @@ class VideoBatchToolV23(_V22):
 
             self._fission_phase_label = ""
             self.log("\n======== 批量裂变全部结束 ========")
+            _ui_clear_run_progress()
             # 先记住输出根，避免 finally 还原快照后命名页找不到
             try:
                 self._last_fission_out_root = (last_out or "").strip()
@@ -738,8 +853,15 @@ class VideoBatchToolV23(_V22):
                 self._pipeline_order_override = None
                 self._ui_batch_quiet = False
             self._fission_phase_label = ""
+            ctl = getattr(self, "_batch_ctl", None)
+            if ctl is not None:
+                ctl.end()
             self._fission_running = False
             self._processing = False
+            try:
+                _ui_clear_run_progress()
+            except Exception:
+                pass
 
     def _fission_worker(
         self,

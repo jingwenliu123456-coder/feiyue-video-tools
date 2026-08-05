@@ -179,7 +179,25 @@ class ModuleColorSwatch(tk.Canvas):
 
 
 def bind_mousewheel(widget: tk.Canvas, *, root: Optional[Any] = None) -> None:
-    """为 Canvas 滚动区域绑定跨平台滚轮（Windows / Linux / macOS）。"""
+    """为 Canvas 滚动区域绑定滚轮（接入工作台全局路由，不覆盖其它区域）。"""
+    try:
+        outer = widget.master
+        inner = None
+        for item in widget.find_all():
+            try:
+                wname = widget.itemcget(item, "window")
+                if wname:
+                    inner = widget.nametowidget(wname)
+                    break
+            except tk.TclError:
+                continue
+        if inner is not None and outer is not None:
+            from ui.workbench_skin import register_scroll_wheel
+
+            register_scroll_wheel(widget, outer, inner)
+            return
+    except Exception:
+        pass
 
     def _on_wheel(event):
         if event.delta:
@@ -189,10 +207,9 @@ def bind_mousewheel(widget: tk.Canvas, *, root: Optional[Any] = None) -> None:
         elif getattr(event, "num", None) == 5:
             widget.yview_scroll(1, "units")
 
-    target = root or widget.winfo_toplevel()
-    target.bind_all("<MouseWheel>", _on_wheel)
-    target.bind_all("<Button-4>", _on_wheel)
-    target.bind_all("<Button-5>", _on_wheel)
+    widget.bind("<MouseWheel>", _on_wheel, add="+")
+    widget.bind("<Button-4>", _on_wheel, add="+")
+    widget.bind("<Button-5>", _on_wheel, add="+")
 
 
 def make_scrollable_frame(parent, *, bg: Optional[str] = None) -> tuple[tk.Canvas, ttk.Frame, ttk.Frame]:
@@ -200,7 +217,9 @@ def make_scrollable_frame(parent, *, bg: Optional[str] = None) -> tuple[tk.Canva
     outer = ttk.Frame(parent)
     outer.pack(fill=tk.BOTH, expand=True)
     canvas = tk.Canvas(outer, highlightthickness=0, bg=bg or CARD_DARK["bg"])
-    vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+    from ui.workbench_skin import make_tk_vscrollbar
+
+    vsb = make_tk_vscrollbar(outer, command=canvas.yview)
     canvas.configure(yscrollcommand=vsb.set)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -302,11 +321,98 @@ def make_button(parent, text: str, command=None, *, kind: str = "default", width
         return ttk.Button(parent, text=text, command=command, style=style, **opts)
 
 
-def make_toggle(parent, text: str, variable, **kw):
+def is_dark_color(hex_color: str) -> bool:
     try:
-        return ttk.Checkbutton(parent, text=text, variable=variable, bootstyle="round-toggle", **kw)
-    except tk.TclError:
-        return ttk.Checkbutton(parent, text=text, variable=variable, **kw)
+        r, g, b = _hex_to_rgb(hex_color)
+    except (ValueError, IndexError):
+        return False
+    lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+    return lum < 0.45
+
+
+def _checkbutton_colors(parent: Any) -> tuple[str, str, str]:
+    """返回 (bg, fg, selectcolor)；勾选区用主题 check 色（勾选变色）。"""
+    fg = "#1C1C1E"
+    select = "#34C759"
+    bg = "#FFFFFF"
+    try:
+        from ui.workbench_skin import WB_BORDER, WB_CARD, WB_CHECK, WB_TEXT, workbench_palette
+
+        pal = workbench_palette()
+        bg = WB_CARD
+        fg = WB_TEXT
+        select = WB_CHECK or pal.get("check", "#34C759")
+    except Exception:
+        pass
+    try:
+        pbg = str(parent.cget("bg") or "")
+        if pbg and pbg.lower() not in ("systembuttonface", "systemwindow", "systemmenu"):
+            bg = pbg
+    except (tk.TclError, AttributeError):
+        pass
+    return bg, fg, select
+
+
+def make_checkbutton(parent, text: str, variable, *, command=None, **kw):
+    """原生对勾勾选框（Windows + ttkbootstrap 下避免 ttk 显示成 X）。"""
+    bg, fg, select = _checkbutton_colors(parent)
+    opts = dict(kw)
+    cmd = command if command is not None else opts.pop("command", None)
+    font = opts.pop("font", FONTS["body"])
+    border = "#C7C7CC"
+    try:
+        from ui.workbench_skin import WB_BORDER, workbench_palette
+
+        border = workbench_palette().get("border", WB_BORDER)
+    except Exception:
+        pass
+    return tk.Checkbutton(
+        parent,
+        text=text,
+        variable=variable,
+        command=cmd,
+        bg=bg,
+        fg=fg,
+        activebackground=bg,
+        activeforeground=fg,
+        selectcolor=select,
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+        bd=0,
+        anchor="w",
+        font=font,
+        **opts,
+    )
+
+
+def make_radiobutton(parent, text: str, variable, value, *, command=None, **kw):
+    """原生单选圆点（暗色主题下避免 ttk 指示器显示成 X）。"""
+    bg, fg, _select = _checkbutton_colors(parent)
+    opts = dict(kw)
+    cmd = command if command is not None else opts.pop("command", None)
+    font = opts.pop("font", FONTS["body"])
+    selectcolor = opts.pop("selectcolor", bg)
+    return tk.Radiobutton(
+        parent,
+        text=text,
+        variable=variable,
+        value=value,
+        command=cmd,
+        bg=bg,
+        fg=fg,
+        activebackground=bg,
+        activeforeground=fg,
+        selectcolor=selectcolor,
+        highlightthickness=0,
+        anchor="w",
+        font=font,
+        **opts,
+    )
+
+
+def make_toggle(parent, text: str, variable, **kw):
+    return make_checkbutton(parent, text, variable, **kw)
 
 
 def create_card(
@@ -351,7 +457,16 @@ def create_card(
         )
         swatch.pack(side=tk.LEFT, padx=(0, 4))
 
-    label_text = f"{icon} {title}".strip() if icon else title
+    label_text = title
+    if icon:
+        try:
+            from modules.platform_utils import ui_decorative_icon
+
+            deco = ui_decorative_icon(icon)
+        except Exception:
+            deco = icon.strip() if icon else ""
+        if deco:
+            label_text = f"{deco} {title}".strip()
     tk.Label(
         header,
         text=label_text,
@@ -449,9 +564,15 @@ def build_toolbar(parent, title: str, *, colors: Optional[dict[str, str]] = None
     c = colors or card_colors()
     bar = tk.Frame(parent, bg=c["toolbar"], height=48)
     bar.pack_propagate(False)
+    try:
+        from modules.platform_utils import use_ui_emoji
+
+        title_text = f"🎬  {title}" if use_ui_emoji() else title
+    except Exception:
+        title_text = f"🎬  {title}"
     tk.Label(
         bar,
-        text=f"🎬  {title}",
+        text=title_text,
         bg=c["toolbar"],
         fg="#FFFFFF" if c["toolbar"] == CARD_DARK["toolbar"] else "#111827",
         font=FONTS["title"],

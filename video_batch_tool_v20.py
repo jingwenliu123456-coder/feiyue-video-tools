@@ -10,6 +10,7 @@ import os
 import sys
 import re
 import json
+import copy
 import shutil
 import tempfile
 import time
@@ -91,7 +92,7 @@ def _subprocess_flags():
     return subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
 
 
-def run_ffmpeg(cmd_list, raise_on_fail=False):
+def run_ffmpeg(cmd_list, raise_on_fail=False, poll_cb=None, progress_cb=None):
     try:
         from core.ffmpeg_safe import run_ffmpeg_safe
         return run_ffmpeg_safe(
@@ -100,6 +101,8 @@ def run_ffmpeg(cmd_list, raise_on_fail=False):
             ffprobe=FFPROBE_PATH,
             raise_on_fail=raise_on_fail,
             creationflags=_subprocess_flags(),
+            poll_cb=poll_cb,
+            progress_cb=progress_cb,
         )
     except Exception as e:
         if raise_on_fail:
@@ -821,13 +824,15 @@ class VideoBatchTool:
         make_button(ef, "浏览", self.select_ending, kind="outline", width=6).grid(row=0, column=2, padx=2, pady=2)
 
         self.ending_keep_audio = BooleanVar(value=False)
-        ttk.Checkbutton(ef, text="保留原音频", variable=self.ending_keep_audio).grid(
+        from modules.ui_skin import make_checkbutton
+
+        make_checkbutton(ef, text="保留原音频", variable=self.ending_keep_audio).grid(
             row=1, column=0, columnspan=3, sticky="w", padx=2, pady=2)
 
         # 高级：默认收起，避免和「视频裁切」混淆误操作
         self.ending_trim = StringVar(value="0")
         self._ending_adv_open = BooleanVar(value=False)
-        adv_btn = ttk.Checkbutton(
+        adv_btn = make_checkbutton(
             ef, text="高级选项（片头裁剪，一般不用）", variable=self._ending_adv_open,
             command=lambda: self._toggle_ending_advanced(ef),
         )
@@ -1847,7 +1852,7 @@ class VideoBatchTool:
         cfg = self._vars_into_config_dict()
         cfg["conflict_mode"] = getattr(self, "conflict_mode", "rename")
         if self._overlay_state:
-            cfg["overlay_state"] = self._overlay_state
+            cfg["overlay_state"] = copy.deepcopy(self._overlay_state)
         cfg["module_colors"] = dict(self.module_colors)
         if hasattr(self, "layer_type"):
             cfg["layer_type"] = self.layer_type.get()
@@ -1863,7 +1868,7 @@ class VideoBatchTool:
         cfg = self._vars_into_config_dict()
         cfg["conflict_mode"] = getattr(self, "conflict_mode", "rename")
         if self._overlay_state:
-            cfg["overlay_state"] = self._overlay_state
+            cfg["overlay_state"] = copy.deepcopy(self._overlay_state)
         cfg["module_colors"] = dict(self.module_colors)
         if hasattr(self, "layer_type"):
             cfg["layer_type"] = self.layer_type.get()
@@ -1884,8 +1889,14 @@ class VideoBatchTool:
             self.conflict_mode = "rename"
         overlay_st = cfg.get("overlay_state")
         if isinstance(overlay_st, dict):
-            self._overlay_state = overlay_st
+            self._overlay_state = copy.deepcopy(overlay_st)
             self._update_overlay_summary()
+        else:
+            self._overlay_state = {}
+            try:
+                self._update_overlay_summary()
+            except Exception:
+                pass
         mc = cfg.get("module_colors")
         if isinstance(mc, dict):
             for k, v in mc.items():
@@ -1903,6 +1914,10 @@ class VideoBatchTool:
         elif hasattr(self, "_on_logo_mode_change"):
             self._on_logo_mode_change()
 
+    def _on_templates_catalog_changed(self) -> None:
+        """方案模板目录变更后回调（子类可刷新裂变页等）。"""
+        pass
+
     def refresh_templates(self) -> None:
         d = _templates_dir()
         names = sorted(p.stem for p in d.glob("*.json") if p.is_file())
@@ -1910,6 +1925,7 @@ class VideoBatchTool:
             self.template_combo["values"] = names
         except Exception:
             pass
+        self._on_templates_catalog_changed()
 
     def save_as_template(self) -> None:
         name = simpledialog.askstring("保存为模板", "模板名称:", parent=self.root)
@@ -2098,7 +2114,7 @@ class VideoBatchTool:
                 self.conflict_mode = "rename"
             overlay_st = cfg.get("overlay_state")
             if isinstance(overlay_st, dict):
-                self._overlay_state = overlay_st
+                self._overlay_state = copy.deepcopy(overlay_st)
                 self._update_overlay_summary()
             elif overlay_st is not None:
                 self._log_exception("load_config", TypeError("overlay_state 格式无效，已忽略"))

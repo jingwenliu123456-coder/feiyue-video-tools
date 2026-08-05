@@ -18,11 +18,12 @@ _DEFAULTS: dict[str, Any] = {
     "user_preferences": {
         "default_tab": "视频批处理",  # 视频批处理 | 规范命名 | 批量裂变
         "default_view": "思维导图",  # 思维导图 | 地铁线路 | 列表
-        "default_theme": "奶油可爱",
+        "default_theme": "简约工作台",
         # 快速启动：不自动加载 | 上次使用的方案 | 具体方案模板名（templates/*.json）
         "batch_autoload": "不自动加载",
         "fission_autoload": "不自动加载",
         "last_used_scheme": "",
+        "last_used_fission_plan": "",
         "default_output_path": "",
         "naming_template": "{scheme}_{date}_{index}",
         "pipeline_order": [],
@@ -111,6 +112,116 @@ def update_prefs(**kwargs: Any) -> dict[str, Any]:
 
 AUTOLOAD_NONE = "不自动加载"
 AUTOLOAD_LAST = "上次使用的方案"
+AUTOLOAD_LAST_PLAN = "上次使用的组合"
+FISSION_PREFIX_TEMPLATE = "模板:"
+FISSION_PREFIX_PLAN = "组合:"
+
+
+def fission_plans_dir() -> Path:
+    d = habi_tool_config_path().parent / "fission_plans"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def list_fission_plan_names() -> list[str]:
+    try:
+        return sorted(p.stem for p in fission_plans_dir().glob("*.json") if p.is_file())
+    except OSError:
+        return []
+
+
+def encode_fission_template(name: str) -> str:
+    n = (name or "").strip()
+    if not n:
+        return AUTOLOAD_NONE
+    if n.startswith(FISSION_PREFIX_TEMPLATE) or n.startswith(FISSION_PREFIX_PLAN):
+        return n
+    return f"{FISSION_PREFIX_TEMPLATE}{n}"
+
+
+def encode_fission_plan(name: str) -> str:
+    n = (name or "").strip()
+    if not n:
+        return AUTOLOAD_NONE
+    if n.startswith(FISSION_PREFIX_PLAN):
+        return n
+    return f"{FISSION_PREFIX_PLAN}{n}"
+
+
+def fission_autoload_display(value: str) -> str:
+    v = (value or "").strip()
+    if v.startswith(FISSION_PREFIX_TEMPLATE):
+        return f"方案模板 · {v[len(FISSION_PREFIX_TEMPLATE):]}"
+    if v.startswith(FISSION_PREFIX_PLAN):
+        return f"方案组合 · {v[len(FISSION_PREFIX_PLAN):]}"
+    return v
+
+
+def normalize_fission_autoload(
+    raw: str,
+    *,
+    template_names: list[str] | None = None,
+) -> str:
+    """把旧版 plain 模板名规范为 模板:xxx，避免设置页下拉框显示打叉。"""
+    v = (raw or "").strip()
+    if not v or v == AUTOLOAD_NONE:
+        return AUTOLOAD_NONE
+    if v in (AUTOLOAD_LAST, AUTOLOAD_LAST_PLAN):
+        return v
+    if v.startswith(FISSION_PREFIX_TEMPLATE) or v.startswith(FISSION_PREFIX_PLAN):
+        return v
+    # 旧版直接存模板名
+    return encode_fission_template(v)
+
+
+def build_fission_autoload_choices(
+    pref: dict[str, Any] | None = None,
+    *,
+    template_names: list[str] | None = None,
+) -> list[str]:
+    """设置页下拉：不加载 / 上次 / 各模板 / 各组合。"""
+    p = pref if isinstance(pref, dict) else prefs()
+    cur_raw = str(p.get("fission_autoload") or AUTOLOAD_NONE).strip()
+    cur = normalize_fission_autoload(cur_raw, template_names=template_names)
+    choices = [AUTOLOAD_NONE, AUTOLOAD_LAST, AUTOLOAD_LAST_PLAN]
+    tpls = list(template_names or [])
+    last_tpl = str(p.get("last_used_scheme") or "").strip()
+    if last_tpl and last_tpl not in tpls:
+        tpls.append(last_tpl)
+    for t in sorted(set(tpls)):
+        enc = encode_fission_template(t)
+        if enc not in choices:
+            choices.append(enc)
+    plans = list_fission_plan_names()
+    last_plan = str(p.get("last_used_fission_plan") or "").strip()
+    if last_plan and last_plan not in plans:
+        plans.append(last_plan)
+    for pn in sorted(set(plans)):
+        enc = encode_fission_plan(pn)
+        if enc not in choices:
+            choices.append(enc)
+    if cur not in choices:
+        choices.append(cur)
+    return choices
+
+
+def resolve_fission_autoload(pref: dict[str, Any] | None = None) -> dict[str, str]:
+    """解析裂变快速启动：kind=none|template|plan，name=模板名或组合文件名（无扩展名）。"""
+    p = pref if isinstance(pref, dict) else prefs()
+    mode = str(p.get("fission_autoload") or AUTOLOAD_NONE).strip()
+    mode = normalize_fission_autoload(mode)
+    if not mode or mode == AUTOLOAD_NONE:
+        return {"kind": "none", "name": ""}
+    if mode == AUTOLOAD_LAST:
+        return {"kind": "template", "name": str(p.get("last_used_scheme") or "").strip()}
+    if mode == AUTOLOAD_LAST_PLAN:
+        return {"kind": "plan", "name": str(p.get("last_used_fission_plan") or "").strip()}
+    if mode.startswith(FISSION_PREFIX_TEMPLATE):
+        return {"kind": "template", "name": mode[len(FISSION_PREFIX_TEMPLATE):].strip()}
+    if mode.startswith(FISSION_PREFIX_PLAN):
+        return {"kind": "plan", "name": mode[len(FISSION_PREFIX_PLAN):].strip()}
+    # 兼容旧版：直接存模板名
+    return {"kind": "template", "name": mode}
 
 
 def resolve_autoload_scheme(
@@ -134,9 +245,23 @@ def resolve_autoload_scheme(
 def remember_scheme(name: str) -> None:
     """记住上次使用的方案模板名（供「上次使用的方案」）。"""
     n = (name or "").strip()
-    if not n or n in (AUTOLOAD_NONE, AUTOLOAD_LAST):
+    if not n or n in (AUTOLOAD_NONE, AUTOLOAD_LAST, AUTOLOAD_LAST_PLAN):
+        return
+    if n.startswith(FISSION_PREFIX_TEMPLATE):
+        n = n[len(FISSION_PREFIX_TEMPLATE):].strip()
+    if n.startswith(FISSION_PREFIX_PLAN):
         return
     update_prefs(last_used_scheme=n)
+
+
+def remember_fission_plan(name: str) -> None:
+    """记住上次使用的裂变组合（fission_plans/*.json 文件名，无扩展名）。"""
+    n = (name or "").strip()
+    if not n:
+        return
+    if n.startswith(FISSION_PREFIX_PLAN):
+        n = n[len(FISSION_PREFIX_PLAN):].strip()
+    update_prefs(last_used_fission_plan=n)
 
 
 def update_window_state(*, width: int, height: int, maximized: bool = False) -> None:

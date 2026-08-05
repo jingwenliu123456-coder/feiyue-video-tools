@@ -136,7 +136,9 @@ class OverlayModule(ttk.Frame):
         self._ctrl_canvas.bind("<Configure>", _on_ctrl_canvas)
 
         # --- 底图层 ---
-        ttk.Checkbutton(ctrl, text="图层1：底图", variable=self.bg_enabled,
+        from modules.ui_skin import make_checkbutton
+
+        make_checkbutton(ctrl, text="图层1：底图", variable=self.bg_enabled,
                         command=self._on_layer_toggle).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Button(ctrl, text="加载底图", command=self.load_base).grid(row=1, column=0, columnspan=2, sticky="ew", pady=1)
         self.base_info = StringVar(value="未加载")
@@ -146,7 +148,7 @@ class OverlayModule(ttk.Frame):
         ttk.Separator(ctrl, orient=HORIZONTAL).grid(row=3, column=0, columnspan=2, sticky="ew", pady=4)
 
         # --- 视频层 ---
-        ttk.Checkbutton(ctrl, text="图层2：视频素材", variable=self.video_enabled,
+        make_checkbutton(ctrl, text="图层2：视频素材", variable=self.video_enabled,
                         command=self._on_layer_toggle).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Button(ctrl, text="选择素材文件夹", command=self.load_video_folder).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=1)
@@ -161,7 +163,7 @@ class OverlayModule(ttk.Frame):
         self.video_preview_info = StringVar(value="当前预览：—")
         ttk.Label(ctrl, textvariable=self.video_preview_info, wraplength=200, font=("", 8)).grid(
             row=8, column=0, columnspan=2, sticky="w")
-        self.logo_custom_cb = ttk.Checkbutton(
+        self.logo_custom_cb = make_checkbutton(
             ctrl,
             text="本视频单独定位 Logo（不勾选则用批默认位置）",
             variable=self.logo_custom_var,
@@ -179,7 +181,7 @@ class OverlayModule(ttk.Frame):
         ttk.Separator(ctrl, orient=HORIZONTAL).grid(row=12, column=0, columnspan=2, sticky="ew", pady=4)
 
         # --- Logo层 ---
-        ttk.Checkbutton(ctrl, text="图层3：Logo", variable=self.logo_enabled,
+        make_checkbutton(ctrl, text="图层3：Logo", variable=self.logo_enabled,
                         command=self._on_layer_toggle).grid(row=13, column=0, columnspan=2, sticky="w")
         ttk.Button(ctrl, text="加载Logo", command=self.load_logo).grid(row=14, column=0, columnspan=2, sticky="ew", pady=1)
         self.logo_info = StringVar(value="未加载")
@@ -204,7 +206,7 @@ class OverlayModule(ttk.Frame):
         # --- 时间控制 ---
         self.time_frame = ttk.Frame(ctrl)
         self.time_frame.grid(row=18, column=0, columnspan=2, sticky="ew")
-        self.adapt_cb = ttk.Checkbutton(
+        self.adapt_cb = make_checkbutton(
             self.time_frame, text="☑ 适配各视频时长", variable=self.adapt_duration,
             command=self._toggle_adapt_duration)
         self.adapt_cb.pack(anchor="w")
