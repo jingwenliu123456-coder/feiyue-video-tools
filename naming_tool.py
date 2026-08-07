@@ -170,7 +170,7 @@ def default_config() -> dict[str, Any]:
         "rules_on_original": False,
         "rename_source": "",
         "rename_target": "",
-        "rename_mode": "click",
+        "rename_mode": "replace",
         "index_digits": 2,
         "date_format": "4",
         "brand_extra": [],
@@ -296,7 +296,7 @@ class NamingToolApp:
         self.legacy_var = tk.BooleanVar(value=False)
         self.rename_source_var = tk.StringVar()
         self.rename_target_var = tk.StringVar()
-        self.rename_mode = tk.StringVar(value="click")
+        self.rename_mode = tk.StringVar(value="replace")
         self.scan_subfolders_var = tk.BooleanVar(value=False)
         self.rules_on_original_var = tk.BooleanVar(value=False)
         self.preview_status_var = tk.StringVar(value="请选择文件夹后点「扫描」")
@@ -944,7 +944,7 @@ class NamingToolApp:
                 pass
 
         win = tk.Toplevel(self.root)
-        win.title("对照改名 — 点击替换 · 单击复制/粘贴 · 双击编辑")
+        win.title("对照改名 — 单击复制 · 单击粘贴 · 双击编辑")
         win.geometry("980x560")
         win.minsize(760, 420)
         try:
@@ -1004,6 +1004,7 @@ class NamingToolApp:
 
     def _build_batch_rename(self, parent: ttk.Frame) -> None:
         from modules.ui_skin import FONTS, create_card, make_button
+        from ui.workbench_skin import make_tk_vscrollbar
 
         card, _, frame = self._naming_card(
             parent, "源 ↔ 目标对照", "✏️", "naming_batch",
@@ -1017,7 +1018,7 @@ class NamingToolApp:
         mode_f = ttk.Frame(frame)
         mode_f.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         ttk.Label(mode_f, text="模式:").pack(side="left", padx=4)
-        ttk.Radiobutton(mode_f, text="点击替换", variable=self.rename_mode, value="click",
+        ttk.Radiobutton(mode_f, text="查找替换", variable=self.rename_mode, value="replace",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
         ttk.Radiobutton(mode_f, text="附加模式", variable=self.rename_mode, value="append",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
@@ -1029,7 +1030,7 @@ class NamingToolApp:
 
         ttk.Label(
             mode_f,
-            text=f"{ui_hint_prefix()}点击替换：左栏单击复制文件名 → 右栏单击粘贴替换；附加/高级见各模式说明",
+            text=f"{ui_hint_prefix()}查找替换：左栏单击复制文件名 → 右栏单击粘贴替换；附加/高级见各模式说明",
             font=FONTS["caption"], foreground="gray",
         ).pack(side="left", padx=8)
 
@@ -1830,9 +1831,9 @@ class NamingToolApp:
             self._update_legacy_strip_count()
             self.rename_source_var.set(cfg.get("rename_source", ""))
             self.rename_target_var.set(cfg.get("rename_target", ""))
-            mode = cfg.get("rename_mode", "click")
-            if mode == "replace":
-                mode = "click"
+            mode = cfg.get("rename_mode", "replace")
+            if mode == "click":
+                mode = "replace"
             self.rename_mode.set(mode)
             self.scan_subfolders_var.set(bool(cfg.get("scan_subfolders", False)))
             self.rules_on_original_var.set(bool(cfg.get("rules_on_original", False)))
@@ -3216,7 +3217,7 @@ class NamingToolApp:
             messagebox.showwarning("提示", "请选择目标文件夹")
             return
         if self.rename_mode.get() != "append":
-            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n点击替换请使用左栏复制、右栏粘贴。")
+            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n查找替换请使用左栏复制、右栏粘贴。")
             return
         suffix = simpledialog.askstring("批量附加重命名", "追加到所有文件名末尾的内容:", parent=self.root)
         if not suffix:

@@ -3015,7 +3015,7 @@ class FissionMindmapPanel:
 
             cp_var = BooleanVar(value=resolve_mov_color_protect(cfg))
             bool_fields["mov_color_protect"] = cp_var
-            self._checkbutton(form, text="颜色保护（先反预乘再缩放）", variable=cp_var).grid(
+            self._checkbutton(form, text="颜色保护（去发灰/发黑）", variable=cp_var).grid(
                 row=7, column=0, columnspan=2, sticky="w", pady=4, padx=6,
             )
             ttk.Label(

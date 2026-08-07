@@ -592,7 +592,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
         make_checkbutton(
             frame,
-            text="颜色保护（去发灰/发黑；先反预乘再缩放，比旧版 geq 快）",
+            text="颜色保护（去发灰/发黑；先缩放再去预乘，略慢但颜色更干净）",
             variable=self.mov_color_protect,
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
@@ -1970,7 +1970,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                 f"拼接落版={self._is_enabled('ending_enable')}"
             )
             if self._is_enabled("enable_mov_watermark") and self._is_enabled("mov_color_protect"):
-                self.log("提示：已开「颜色保护」（先反预乘再缩放，减轻半透明发灰）")
+                self.log("提示：已开「颜色保护」（先缩放再去预乘，减轻半透明发灰）")
             self.log("快捷键：空格=暂停/继续 · Esc=停止")
 
             total = len(files)

@@ -78,25 +78,29 @@ def video_to_canvas(vx: int, vy: int, vw: int, vh: int, vid_w: int, vid_h: int) 
 
 def _wm_color_protect_chain() -> str:
     """
-    在缩放前反预乘：AE 透明 MOV 为预乘 alpha，应先 unpremultiply 再 scale。
+    去预乘以减轻半透明发灰/发黑。
 
-    旧版在 scale 后用 geq 逐像素反预乘，质量尚可但 1080p 约 10–15s 片要 20s+。
-    FFmpeg 原生 unpremultiply（inplace）通常更快，且顺序更符合合成规范。
+    必须接在 scale 之后：先缩到画面尺寸再 geq（原生 unpremultiply 对这套 AE MOV 不够干净）。
     """
-    return ",unpremultiply=inplace=1"
+    return (
+        ",geq="
+        "r='if(lte(alpha(X,Y)\\,0)\\,0\\,if(lt(alpha(X,Y)\\,255)\\,min(255\\,r(X,Y)*255/alpha(X,Y))\\,r(X,Y)))':"
+        "g='if(lte(alpha(X,Y)\\,0)\\,0\\,if(lt(alpha(X,Y)\\,255)\\,min(255\\,g(X,Y)*255/alpha(X,Y))\\,g(X,Y)))':"
+        "b='if(lte(alpha(X,Y)\\,0)\\,0\\,if(lt(alpha(X,Y)\\,255)\\,min(255\\,b(X,Y)*255/alpha(X,Y))\\,b(X,Y)))':"
+        "a='alpha(X,Y)'"
+    )
 
 
 def _wm_scale_chain(w: int, h: int, *, color_protect: bool) -> str:
-    """format →（可选）反预乘 → 缩放到目标尺寸。预乘素材须先反预乘再 scale。"""
+    """format → 缩放到目标尺寸 →（可选）颜色保护。顺序不能反。"""
     w, h = max(2, int(w)), max(2, int(h))
     if w % 2:
         w -= 1
     if h % 2:
         h -= 1
-    chain = "format=rgba"
+    chain = f"format=rgba,scale={w}:{h}:flags=bicubic"
     if color_protect:
         chain += _wm_color_protect_chain()
-    chain += f",scale={w}:{h}:flags=bicubic"
     return chain
 
 
