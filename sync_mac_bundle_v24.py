@@ -39,7 +39,16 @@ MAC_SCRIPTS = [
     "给Mac同事-打包与使用说明.md",
 ]
 
-DIRS = ["core", "modules", "ui", "scripts"]
+DIRS = ["core", "modules", "ui", "scripts", "templates"]
+
+EXTRA_FILES = [
+    "README_使用说明.txt",
+    "字幕环境-给同事.txt",
+    "MAC打包指南.md",
+    "naming_config.json",
+    "video_batch_config_v21.json",
+    "video_batch_config_v24.json",
+]
 
 ICON_FILES = [
     "video_icon.png",
@@ -90,6 +99,11 @@ def main() -> None:
         else:
             print(f"  [MISS mac] {name}")
 
+    for name in EXTRA_FILES:
+        src = ROOT / name
+        if src.is_file():
+            _copy_file(src, DEST / name)
+
     for name in DIRS:
         _copy_tree(ROOT / name, DEST / name)
 
@@ -109,6 +123,9 @@ def main() -> None:
         "  chmod +x setup_and_build_mac.sh build_mac.sh\n"
         "  ./setup_and_build_mac.sh\n"
         "Output: dist/HabiVideoTool_macOS/\n"
+        "  - HabiVideoTool.app (V24 工作台)\n"
+        "  - HabiNamingTool.app (独立命名)\n"
+        "  - templates/ (方案模板，若已同步)\n"
         "Subtitle: cd dist/HabiVideoTool_macOS && ./setup_subtitle_env_mac.sh\n",
         encoding="utf-8",
     )

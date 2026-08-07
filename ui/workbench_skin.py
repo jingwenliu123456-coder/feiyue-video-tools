@@ -836,7 +836,7 @@ def apply_workbench_root(root: tk.Misc) -> None:
 
 
 def make_scroll(parent: tk.Misc, *, bg: str = WB_BG, autohide: bool = True) -> tuple[tk.Canvas, ttk.Frame, ttk.Frame]:
-    """返回 canvas, outer, inner。使用 tk.Scrollbar（8px），内容不够高时自动隐藏。"""
+    """返回 canvas, outer, inner。outer 尚未 pack/grid，由调用方负责布局。"""
     outer = ttk.Frame(parent)
     outer.columnconfigure(0, weight=1)
     outer.rowconfigure(0, weight=1)

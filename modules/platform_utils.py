@@ -98,10 +98,127 @@ def ui_gear_glyph() -> str:
     return "···" if is_mac() else "⚙"
 
 
-def subprocess_flags():
-    if SYSTEM == "Windows":
-        return subprocess.CREATE_NO_WINDOW
-    return 0
+def silent_subprocess_kwargs() -> dict:
+    """
+    跨平台 GUI 子进程默认参数：
+    - 全平台：stdin=DEVNULL，避免 macOS .app 继承 stdin 导致 FFmpeg 挂起
+    - macOS/Linux：close_fds 降低 fd 继承
+    - Windows：CREATE_NO_WINDOW + 隐藏 STARTUPINFO，避免 CMD 黑框
+    """
+    kw: dict = {
+        "stdin": subprocess.DEVNULL,
+    }
+    if SYSTEM != "Windows":
+        kw["close_fds"] = True
+    else:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        kw["startupinfo"] = si
+    return kw
+
+
+def hidden_subprocess_kwargs() -> dict:
+    """兼容旧名；请优先使用 silent_subprocess_kwargs / merge_subprocess_kwargs。"""
+    return silent_subprocess_kwargs()
+
+
+def resolve_subprocess_cwd(explicit: str | Path | None = None) -> str | None:
+    """
+    解析子进程工作目录。
+    macOS 双击 .app 时 cwd 常为 /，相对路径会失效，回退到程序目录。
+    """
+    if explicit:
+        p = Path(explicit)
+        return str(p if p.is_dir() else p.parent)
+    if SYSTEM == "Darwin":
+        try:
+            cwd = os.getcwd()
+            if cwd and cwd not in ("", "/"):
+                return None
+        except OSError:
+            pass
+        ad = app_dir()
+        if ad.is_dir():
+            return str(ad)
+    return None
+
+
+def merge_subprocess_kwargs(user_kwargs: dict | None = None) -> dict:
+    """合并 silent 默认项；不覆盖调用方已显式传入的参数。"""
+    merged = dict(user_kwargs or {})
+    for key, val in silent_subprocess_kwargs().items():
+        if key == "creationflags":
+            merged[key] = int(merged.get(key, 0)) | int(val)
+        else:
+            merged.setdefault(key, val)
+    if SYSTEM == "Darwin":
+        merged.setdefault("stdout", subprocess.PIPE)
+        merged.setdefault("stderr", subprocess.PIPE)
+    if merged.get("cwd") is None:
+        cwd = resolve_subprocess_cwd()
+        if cwd:
+            merged["cwd"] = cwd
+    return merged
+
+
+def run_subprocess(
+    cmd,
+    *,
+    cwd: str | Path | None = None,
+    check: bool = False,
+    **kwargs,
+):
+    """跨平台静默 subprocess.run（批处理 / FFmpeg / ffprobe 统一入口）。"""
+    kw = merge_subprocess_kwargs(kwargs)
+    if cwd is not None:
+        kw["cwd"] = str(cwd)
+    return subprocess.run(cmd, check=check, **kw)
+
+
+_SUBPROCESS_HIDE_PATCHED = False
+
+
+def install_silent_subprocess() -> None:
+    """GUI 应用：全局 patch subprocess，避免遗漏调用点（Windows 黑框 / macOS stdin 挂起等）。"""
+    global _SUBPROCESS_HIDE_PATCHED
+    if _SUBPROCESS_HIDE_PATCHED:
+        return
+    _SUBPROCESS_HIDE_PATCHED = True
+
+    _orig_run = subprocess.run
+    _orig_popen = subprocess.Popen
+
+    def run(*args, **kwargs):
+        return _orig_run(*args, **merge_subprocess_kwargs(kwargs))
+
+    def popen(*args, **kwargs):
+        return _orig_popen(*args, **merge_subprocess_kwargs(kwargs))
+
+    subprocess.run = run  # type: ignore[method-assign]
+    subprocess.Popen = popen  # type: ignore[method-assign]
+
+
+def install_windows_subprocess_hide() -> None:
+    """兼容旧名。"""
+    install_silent_subprocess()
+
+
+def resolve_console_free_python(python_exe: str) -> str:
+    """Windows: 同目录有 pythonw.exe 时优先使用，减少 Whisper 等子进程黑框。"""
+    if SYSTEM != "Windows":
+        return python_exe
+    p = Path(python_exe)
+    if p.name.lower() == "python.exe":
+        pw = p.with_name("pythonw.exe")
+        if pw.is_file():
+            return str(pw)
+    return python_exe
+
+
+def subprocess_flags() -> int:
+    return int(hidden_subprocess_kwargs().get("creationflags") or 0)
 
 
 def ffmpeg_names() -> tuple[str, str]:
@@ -112,9 +229,11 @@ def ffmpeg_names() -> tuple[str, str]:
 
 def check_ffmpeg_available(ffmpeg: str, ffprobe: str) -> tuple[bool, str]:
     try:
-        r = subprocess.run(
-            [ffmpeg, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, creationflags=subprocess_flags(),
+        r = run_subprocess(
+            [ffmpeg, "-version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         if r.returncode != 0:
             return False, f"无法运行 {ffmpeg}"

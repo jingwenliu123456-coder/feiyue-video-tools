@@ -1,15 +1,30 @@
-Habi 视频批处理工具 V20
-========================
+飞跃视频工具 · 快速说明
+====================================
 
 【Windows】
-  双击 HabiVideoTool.exe 启动主程序
-  双击 HabiNamingTool.exe 启动规范命名工具（也可从主界面按钮打开）
+  双击 飞跃视频工具.exe          主程序（批处理 + 命名 + 裂变 + 字幕）
 
 【macOS】
-  首次请右键 HabiVideoTool.app -> 打开 -> 打开
-  命名工具同理：HabiNamingTool.app
+  首次：右键 HabiVideoTool.app -> 打开 -> 打开
+  命名：HabiNamingTool.app 同理
+
+【基本流程】
+  1. 选输入文件夹、输出文件夹
+  2. 加载方案模板（或勾选功能自行设置）
+  3. 点「开始处理」
+  4. 切到「规范命名」扫描并重命名（多方案输出时勾选「含子文件夹」）
+
+【字幕 SRT（可选）】
+  普通同事不用 pip、不用命令行：
+  · 最简单：用「外部 SRT → 烧录」（剪映/PR 导出字幕）
+  · 要用 AI 识别：zip 里若已有 .venv_subtitle 文件夹 → 直接用
+  · 否则：请 IT 管理员双击 setup_subtitle_env.bat 一次（全自动）
+  详见 字幕环境-给同事.txt
+
+【完整说明书】
+  见 documentation/飞跃视频批处理工具说明书.md
 
 【说明】
-  - 无需安装 Python
-  - 配置保存在程序同目录
-  - 若提示找不到 FFmpeg，请联系管理员获取含 FFmpeg 的完整包
+  - 无需安装 Python；完整包已内置 FFmpeg
+  - 配置不会随升级 exe 丢失
+  - 遇问题请截图日志区联系维护同事

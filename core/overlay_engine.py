@@ -18,7 +18,13 @@ AENC = ["-c:a", "aac", "-b:a", "128k"]
 
 
 def _subprocess_flags():
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    from modules.platform_utils import subprocess_flags
+    return subprocess_flags()
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 def canvas_h(base_w: int, base_h: int) -> int:
@@ -75,7 +81,7 @@ def probe_video_size(ffprobe: str, path: Path) -> tuple[int, int]:
         [ffprobe, "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height", "-of", "json", str(path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="ignore", creationflags=_subprocess_flags(),
+        encoding="utf-8", errors="ignore", **_hidden_subprocess_kwargs(),
     )
     if r.returncode != 0:
         raise RuntimeError(r.stderr[-300:] if r.stderr else "ffprobe failed")
@@ -236,7 +242,7 @@ def probe_duration(ffprobe: str, path: Path) -> float:
         [ffprobe, "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-        encoding="utf-8", errors="ignore", creationflags=_subprocess_flags(),
+        encoding="utf-8", errors="ignore", **_hidden_subprocess_kwargs(),
     )
     if r.returncode != 0:
         return 0.0
@@ -264,7 +270,7 @@ def extract_first_frame(ffmpeg: str, ffprobe: str, video_path: Path) -> Path:
                 "-vf", f"scale={CANVAS_W}:{ch}", "-q:v", "2", str(thumb_path),
             ],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=_subprocess_flags(),
+            **_hidden_subprocess_kwargs(),
         )
         return r.returncode == 0 and thumb_path.is_file() and thumb_path.stat().st_size > 0
 

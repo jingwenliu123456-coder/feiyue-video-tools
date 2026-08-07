@@ -1,68 +1,47 @@
 # -*- mode: python ; coding: utf-8 -*-
-# macOS 主程序（V24 工作台）打包：HabiVideoTool.app
-#
-# 用法（Mac）：
-#   python3 -m PyInstaller --noconfirm --clean video_batch_tool_v24_mac_main.spec
+# Windows 打包配置：V24 工作台（单 exe，命名已内嵌在工作台 Tab）
+# 用法: py -3.13 -m PyInstaller video_batch_tool_v24_win.spec
 
 import os
-import sys
-from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 PROJECT_DIR = SPECPATH
-sys.path.insert(0, PROJECT_DIR)
-from modules.platform_utils import find_packaging_icon
+
+VIDEO_EXE_NAME = "飞跃视频工具"
 
 
 def _exists(name: str) -> str:
     return os.path.join(PROJECT_DIR, name)
 
 
-def _optional_icon_datas():
-    out = []
-    seen = set()
-    for role in ("video", "naming"):
-        for ext in ("png", "ico", "icns"):
-            p = find_packaging_icon(PROJECT_DIR, role, ext)
-            if p and p not in seen:
-                seen.add(p)
-                out.append((p, "."))
-    return out
+def _first_icon(*names: str):
+    for name in names:
+        p = _exists(name)
+        if os.path.isfile(p):
+            return p
+    return None
 
 
 def _optional_data(src_name: str, dest: str = "."):
     src = _exists(src_name)
-    return [(src, dest)] if os.path.isfile(src) else []
+    if os.path.isfile(src):
+        return [(src, dest)]
+    return []
 
 
 def _optional_tree(dir_name: str, prefix: str):
     src = _exists(dir_name)
-    return [(src, prefix)] if os.path.isdir(src) else []
+    if os.path.isdir(src):
+        return [(src, prefix)]
+    return []
 
 
-def _ffmpeg_binaries_mac():
+def _ffmpeg_binaries():
     out = []
-    for src_name in ("ffmpeg_mac", "ffprobe_mac"):
+    for src_name in ("ffmpeg.exe", "ffprobe.exe"):
         src = _exists(src_name)
         if os.path.isfile(src):
             out.append((src, "bin"))
-    return out
-
-
-def _tk_tcl_tk_datas():
-    out = []
-    try:
-        from tkinter import Tcl  # noqa
-
-        tcl_lib = Tcl().eval("info library")
-        tcl_dir = Path(tcl_lib).resolve()
-        tk_dir = (tcl_dir.parent / "tk8.6").resolve()
-        if tcl_dir.is_dir():
-            out.append((str(tcl_dir), "tcl/tcl8.6"))
-        if tk_dir.is_dir():
-            out.append((str(tk_dir), "tcl/tk8.6"))
-    except Exception:
-        pass
     return out
 
 
@@ -73,22 +52,21 @@ except Exception:
 
 datas = list(_tb_datas)
 for pair in (
-    _optional_data("video_batch_config_v24.json"),
-    _optional_data("video_batch_config_v23.json"),
-    _optional_data("video_batch_config_v22.json"),
-    _optional_data("video_batch_config_v21.json"),
-    _optional_data("video_batch_config_v20.json"),
+    _optional_data("video_icon.ico"),
+    _optional_data("video_icon.png"),
+    _optional_data("app_icon.ico"),
+    _optional_data("app_icon.png"),
+    _optional_data("naming_config.json", "defaults"),
+    _optional_data("video_batch_config_v24.json", "defaults"),
+    _optional_data("video_batch_config_v23.json", "defaults"),
+    _optional_data("video_batch_config_v22.json", "defaults"),
+    _optional_data("video_batch_config_v21.json", "defaults"),
 ):
     datas.extend(pair)
-datas.extend(_optional_icon_datas())
-for pair in _optional_tree("assets", "assets"):
-    datas.extend(pair)
-for pair in _optional_tree("scripts", "scripts"):
-    datas.extend(pair)
-for pair in _tk_tcl_tk_datas():
-    datas.append(pair)
+datas.extend(_optional_tree("assets", "assets"))
+datas.extend(_optional_tree("scripts", "scripts"))
 
-binaries = _ffmpeg_binaries_mac() + list(_tb_binaries)
+binaries = _ffmpeg_binaries() + list(_tb_binaries)
 
 hiddenimports = (
     list(_tb_hidden)
@@ -104,6 +82,7 @@ hiddenimports = (
         "tkinter.filedialog",
         "tkinter.messagebox",
         "tkinter.ttk",
+        "tkinter.simpledialog",
         "tkinterdnd2",
         "video_batch_tool_v20",
         "video_batch_tool_v21",
@@ -131,6 +110,7 @@ hiddenimports = (
         "core.preview_composer",
         "core.watermark",
         "core.ffmpeg_safe",
+        "core.batch_control",
         "ui.overlay_module",
         "ui.preview_canvas",
         "ui.preview_zoom_dialog",
@@ -139,17 +119,19 @@ hiddenimports = (
         "ui.timeline_canvas",
         "ui.workbench_skin",
         "ui.fission_mindmap_tab",
-        "ui.naming_convention_tab",
         "ui.rename_rule_blocks",
         "ui.three_column_layout",
         "ui.app_theme",
-        "core.batch_control",
+        "ui.naming_convention_tab",
         "ui.annual_report_ui",
         "ui.annual_report_html",
+        "naming_tool",
     ]
 )
 
-a = Analysis(
+block_cipher = None
+
+a_main = Analysis(
     ["video_batch_tool_v24.py"],
     pathex=[PROJECT_DIR],
     binaries=binaries,
@@ -157,28 +139,34 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=["rthook_tkinter_paths.py"],
+    runtime_hooks=[],
     excludes=["torch", "tensorflow"],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure)
+pyz_main = PYZ(a_main.pure, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
+exe_main = EXE(
+    pyz_main,
+    a_main.scripts,
+    a_main.binaries,
+    a_main.datas,
     [],
-    name="HabiVideoTool",
+    name=VIDEO_EXE_NAME,
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
-)
-
-app = BUNDLE(
-    exe,
-    name="HabiVideoTool.app",
-    icon=find_packaging_icon(PROJECT_DIR, "video", "icns")
-    or find_packaging_icon(PROJECT_DIR, "video", "ico")
-    or None,
-    bundle_identifier="com.habi.videotool.v24",
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=_first_icon("video_icon.ico", "app_icon.ico"),
 )

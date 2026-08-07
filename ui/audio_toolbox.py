@@ -21,8 +21,9 @@ VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
 AUDIO_EXTS = {".mp3", ".wav", ".aac", ".m4a", ".flac"}
 
 
-def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+def _hidden_kw() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 def list_media(folder: str, *, videos_only: bool = True) -> list[str]:
@@ -302,7 +303,7 @@ class AudioToolboxWindow(Toplevel):
 
     def _run_ffmpeg(self, cmd: list[str]) -> None:
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore",
-                           creationflags=_subprocess_flags())
+                           **_hidden_kw())
         if r.returncode != 0:
             raise RuntimeError((r.stderr or r.stdout or "FFmpeg 失败")[:300])
 

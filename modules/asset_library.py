@@ -77,6 +77,7 @@ def add_asset(
     asset_type: AssetType = "other",
     name: str = "",
     mode: str | None = None,
+    apply_target: str = "",
 ) -> dict[str, Any] | None:
     src = Path(source_path)
     if not src.is_file():
@@ -110,6 +111,8 @@ def add_asset(
         "valid": True,
         "addedAt": time.strftime("%Y-%m-%d %H:%M"),
     }
+    if (apply_target or "").strip():
+        item["applyTarget"] = str(apply_target).strip()
     lib.setdefault("assets", []).append(item)
     if mode:
         lib["mode"] = use_mode

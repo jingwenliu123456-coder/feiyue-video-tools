@@ -12,6 +12,24 @@ from typing import Any, Optional
 
 FISSION_SCHEMA_VERSION = 1
 
+
+def resolve_mov_color_protect(cfg: dict[str, Any]) -> bool:
+    """历史方案模板多数未写入 mov_color_protect；开 MOV 水印时默认启用颜色保护。"""
+    if not isinstance(cfg, dict):
+        return False
+    if "mov_color_protect" in cfg:
+        return bool(cfg["mov_color_protect"])
+    return bool(cfg.get("enable_mov_watermark"))
+
+
+def apply_config_legacy_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    """补全旧模板/快照缺失字段，不覆盖已显式写入的键。"""
+    out = copy.deepcopy(cfg) if isinstance(cfg, dict) else {}
+    if "mov_color_protect" not in out:
+        out["mov_color_protect"] = resolve_mov_color_protect(out)
+    return out
+
+
 # 裂变功能键 → 批处理流水线步骤键（与 VideoBatchToolV21._BATCH_PIPELINE_DEFAULT 对齐）
 ENABLE_KEY_TO_STEP: dict[str, str] = {
     "cut_enable": "cut",
@@ -197,20 +215,31 @@ def merge_branch_selection_after_plan_change(
     old_branch_names: list[str],
     new_branch_names: list[str],
 ) -> list[str]:
-    """方案库变更后：保留仍存在的勾选，新方案默认不勾。"""
-    old_set = {sanitize_branch_name(n) for n in old_branch_names if str(n).strip()}
+    """方案库变更后：保留仍存在的勾选；新方案默认不勾（空勾选保持为空）。"""
     new_valid = {sanitize_branch_name(n) for n in new_branch_names if str(n).strip()}
     picked = [
         sanitize_branch_name(n)
         for n in (old_selected or [])
         if sanitize_branch_name(n) in new_valid
     ]
-    if picked:
-        return picked
-    # 旧数据「空=全选」迁移：若旧库非空且旧勾选为空，视为曾全选 → 只保留旧库方案在新库中的交集
-    if not (old_selected or []) and old_set:
-        return sorted(old_set & new_valid)
-    return []
+    return picked
+
+
+def attach_branches_to_group_selection(
+    group: FissionSourceGroup,
+    branch_names: list[str],
+    branch_names_to_add: list[str],
+) -> None:
+    """把新方案名追加进某源组的勾选列表（去重、仅保留仍存在的方案名）。"""
+    valid = {sanitize_branch_name(n) for n in branch_names if str(n).strip()}
+    sel = {sanitize_branch_name(n) for n in (group.selected_branch_names or []) if str(n).strip()}
+    for n in branch_names_to_add:
+        sn = sanitize_branch_name(n)
+        if sn in valid:
+            sel.add(sn)
+    group.selected_branch_names = [
+        bn for bn in branch_names if sanitize_branch_name(bn) in sel
+    ]
 
 
 @dataclass
@@ -292,7 +321,7 @@ def resolve_branch_config(
 ) -> dict[str, Any]:
     """返回该分支要应用的完整配置 dict（深拷贝，避免多方案共享同一 dict）。"""
     if branch.embedded_config and isinstance(branch.embedded_config, dict):
-        return copy.deepcopy(branch.embedded_config)
+        return apply_config_legacy_defaults(branch.embedded_config)
     name = (branch.template_name or "").strip()
     if not name:
         raise ValueError(f"分支「{branch.branch_name}」未绑定模板，也无自建快照")
@@ -302,7 +331,7 @@ def resolve_branch_config(
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise TypeError(f"方案模板格式无效: {path.name}")
-    return copy.deepcopy(data)
+    return apply_config_legacy_defaults(data)
 
 
 def bind_fission_io_paths(cfg: dict[str, Any], *, in_path: str, out_path: str) -> dict[str, Any]:

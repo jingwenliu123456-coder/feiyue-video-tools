@@ -18,8 +18,9 @@ except ImportError:
     HAS_PIL = False
 
 
-def _subprocess_flags():
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+def _hidden_subprocess_kwargs() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 class WatermarkPreviewDialog:
@@ -100,7 +101,7 @@ class WatermarkPreviewDialog:
                 [ffmpeg, "-y", "-i", str(video_path), "-ss", "00:00:00", "-vframes", "1",
                  "-s", f"{CANVAS_W}x{CANVAS_H}", "-q:v", "2", self._thumb_path],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                creationflags=_subprocess_flags(), check=True,
+                **_hidden_subprocess_kwargs(), check=True,
             )
             img = Image.open(self._thumb_path).convert("RGB")
             self._photo = ImageTk.PhotoImage(img)

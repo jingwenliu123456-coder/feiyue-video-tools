@@ -15,6 +15,7 @@ from modules.fission_engine import (
     MAX_SOURCE_GROUPS,
     bind_fission_io_paths,
     explicit_branch_selection,
+    attach_branches_to_group_selection,
     merge_branch_selection_after_plan_change,
     list_template_names,
     new_group_id,
@@ -184,6 +185,7 @@ class FissionMindmapPanel:
         # 多源组列表改挂在左栏（可全高滚动），不再占顶栏
         self._sg_cards: list[dict] = []
         self._sg_expanded: dict[str, bool] = {}
+        self._sg_active_group_id: str = ""
 
         self._body = ttk.Frame(self.frame)
         self._body.pack(fill=BOTH, expand=True, padx=8, pady=8)
@@ -651,7 +653,7 @@ class FissionMindmapPanel:
         paned = ttk.Panedwindow(parent, orient=tk.HORIZONTAL)
         paned.grid(row=0, column=0, sticky="nsew")
 
-        left = ttk.Frame(paned, width=260)
+        left = ttk.Frame(paned, width=340)
         self._left_pane = left
         self._map_paned = paned
         mid = ttk.Frame(paned)
@@ -660,7 +662,7 @@ class FissionMindmapPanel:
         paned.add(mid, weight=5)
         paned.add(self._right_outer, weight=1)
         try:
-            paned.pane(left, minsize=220)
+            paned.pane(left, minsize=300)
             paned.pane(self._right_outer, minsize=200)
         except Exception:
             pass
@@ -967,12 +969,16 @@ class FissionMindmapPanel:
                     except Exception:
                         pass
             try:
+                paned.pane(left, minsize=300 if multi else 240)
+            except Exception:
+                pass
+            try:
                 self.root.after(60, self._apply_map_default_sashes)
             except Exception:
                 pass
 
     def _apply_map_default_sashes(self) -> None:
-        """默认：中间最大，左右约 22%/24%，像常见三栏工作台。"""
+        """默认：中间最大；多源时左栏略宽以容纳源组表单。"""
         paned = getattr(self, "_map_paned", None)
         if paned is None:
             return
@@ -983,7 +989,11 @@ class FissionMindmapPanel:
             return
         if w < 500:
             return
-        left_w = max(240, min(320, int(w * 0.22)))
+        multi = self._io_mode.get() == "多源"
+        if multi:
+            left_w = max(300, min(400, int(w * 0.28)))
+        else:
+            left_w = max(240, min(320, int(w * 0.22)))
         right_w = max(230, min(300, int(w * 0.24)))
         try:
             paned.sashpos(0, left_w)
@@ -1248,7 +1258,7 @@ class FissionMindmapPanel:
         ttk.Label(head, text="① 源素材组", font=("Microsoft YaHei", 10, "bold")).pack(anchor="w")
         ttk.Label(
             head, text="每组：输入 → 预处理(可选) → 勾选方案",
-            foreground="gray", font=("", 8), wraplength=230,
+            foreground="gray", font=("", 8), wraplength=320,
         ).pack(anchor="w")
         btn_row = ttk.Frame(head)
         btn_row.pack(fill=X, pady=(6, 0))
@@ -1258,15 +1268,17 @@ class FissionMindmapPanel:
         )
         sg_drop = tk.Label(
             head,
-            text="拖入文件夹到此处",
+            text="拖入文件夹：优先填入当前展开组\n也可拖到下方源组标题/输入行",
             bg=self.th["card"],
             fg=self.th["muted"],
             relief="groove",
             bd=1,
             pady=6,
             cursor="hand2",
+            justify=tk.CENTER,
         )
         sg_drop.pack(fill=X, pady=(6, 0))
+        self._sg_drop_lbl = sg_drop
         self._hook_folder_drop(sg_drop)
 
         list_shell = ttk.Frame(parent)
@@ -1322,6 +1334,8 @@ class FissionMindmapPanel:
         gid = group_id or ""
         cur = bool(self._sg_expanded.get(gid, False))
         self._sg_expanded[gid] = not cur
+        if not cur and gid:
+            self._sg_active_group_id = gid
         self._rebuild_source_group_cards()
 
     def _tpl_names(self) -> list[str]:
@@ -1406,7 +1420,7 @@ class FissionMindmapPanel:
         else:
             pp = "无预处理"
         if not branch_vars:
-            sch = "方案:全部"
+            sch = "方案:无"
         else:
             n = sum(1 for v in branch_vars.values() if bool(v.get()))
             sch = f"方案:{n}/{len(branch_vars)}"
@@ -1439,13 +1453,29 @@ class FissionMindmapPanel:
             kind="outline", width=3,
         ).pack(side=LEFT, padx=(0, 4))
         self._checkbutton(head, text=f"组{idx + 1}", variable=en_var).pack(side=LEFT)
-        ttk.Entry(head, textvariable=title_var, width=12).pack(side=LEFT, padx=4)
+        ttk.Entry(head, textvariable=title_var).pack(side=LEFT, fill=X, expand=True, padx=4)
+
         summary_var = StringVar(value="")
-        summary_lbl = ttk.Label(head, textvariable=summary_var, foreground="gray", font=("", 8))
-        summary_lbl.pack(side=LEFT, fill=X, expand=True, padx=6)
-        make_button(head, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=RIGHT, padx=1)
-        make_button(head, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=RIGHT, padx=1)
-        make_button(head, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=RIGHT, padx=1)
+        head_actions = ttk.Frame(card)
+        head_actions.pack(fill=X, pady=(2, 0))
+        if expanded:
+            btn_row = ttk.Frame(head_actions)
+            btn_row.pack(side=RIGHT)
+            make_button(btn_row, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=LEFT, padx=1)
+            make_button(btn_row, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=LEFT, padx=1)
+            make_button(btn_row, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=LEFT, padx=1)
+        else:
+            summary_lbl = ttk.Label(
+                head_actions, textvariable=summary_var, foreground="gray", font=("", 8),
+                wraplength=300, justify="left",
+            )
+            summary_lbl.pack(side=LEFT, fill=X, expand=True, padx=(28, 4))
+            btn_row = ttk.Frame(head_actions)
+            btn_row.pack(side=RIGHT)
+            make_button(btn_row, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=LEFT, padx=1)
+            make_button(btn_row, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=LEFT, padx=1)
+            make_button(btn_row, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=LEFT, padx=1)
+        self._hook_folder_drop(head, lambda dirs, g=gid: self._on_folders_dropped(dirs, target_group_id=g))
 
         body = ttk.Frame(card, padding=(28, 4, 4, 4))
         if expanded:
@@ -1455,6 +1485,7 @@ class FissionMindmapPanel:
         r1.pack(fill=X, pady=2)
         ttk.Label(r1, text="输入").pack(side=LEFT)
         ttk.Entry(r1, textvariable=in_var).pack(side=LEFT, fill=X, expand=True, padx=4)
+        self._hook_folder_drop(r1, lambda dirs, g=gid: self._on_folders_dropped(dirs, target_group_id=g))
 
         def browse_in(v=in_var):
             p = filedialog.askdirectory(parent=self.root, title="选择输入文件夹")
@@ -1475,19 +1506,22 @@ class FissionMindmapPanel:
                 v.set(p)
 
         make_button(r2, "浏览", browse_out, kind="outline", width=5).pack(side=LEFT)
-        ttk.Label(r2, text="空=用全局输出根", foreground="gray", font=("", 8)).pack(side=LEFT, padx=4)
+        ttk.Label(body, text="空=用全局输出根", foreground="gray", font=("", 8)).pack(anchor="w", padx=(28, 0))
 
         r3 = ttk.Frame(body)
         r3.pack(fill=X, pady=2)
         self._checkbutton(r3, text="预处理", variable=pp_en, command=lambda: _refresh_summary()).pack(side=LEFT)
-        pp_tpl_cb = ttk.Combobox(r3, textvariable=pp_tpl, values=tpls, width=22, state="readonly")
-        pp_tpl_cb.pack(side=LEFT, padx=4)
-        ttk.Label(r3, text="成品", foreground="gray", font=("", 8)).pack(side=LEFT)
+        pp_tpl_cb = ttk.Combobox(r3, textvariable=pp_tpl, values=tpls, state="readonly")
+        pp_tpl_cb.pack(side=LEFT, fill=X, expand=True, padx=4)
+
+        r3b = ttk.Frame(body)
+        r3b.pack(fill=X, pady=2)
+        ttk.Label(r3b, text="成品").pack(side=LEFT)
         ttk.Combobox(
-            r3, textvariable=pp_mode, width=10, state="readonly",
+            r3b, textvariable=pp_mode, width=10, state="readonly",
             values=["保留", "指定路径", "自动清理"],
         ).pack(side=LEFT, padx=4)
-        ttk.Entry(r3, textvariable=pp_path, width=18).pack(side=LEFT, padx=2)
+        ttk.Entry(r3b, textvariable=pp_path).pack(side=LEFT, fill=X, expand=True, padx=2)
 
         def browse_pp(v=pp_path, m=pp_mode):
             p = filedialog.askdirectory(parent=self.root, title="预处理成品目录")
@@ -1495,16 +1529,20 @@ class FissionMindmapPanel:
                 v.set(p)
                 m.set("指定路径")
 
-        make_button(r3, "…", browse_pp, kind="outline", width=3).pack(side=LEFT)
+        make_button(r3b, "…", browse_pp, kind="outline", width=3).pack(side=LEFT)
 
         r4 = ttk.Frame(body)
         r4.pack(fill=X, pady=(4, 0))
         ttk.Label(r4, text="裂变方案").pack(side=LEFT)
-        ttk.Label(r4, text="（新加方案默认不勾；请按需勾选）", foreground="gray", font=("", 8)).pack(side=LEFT, padx=4)
+        ttk.Label(
+            r4, text="（旧方案默认不勾；新加方案自动勾选）",
+            foreground="gray", font=("", 8), wraplength=280,
+        ).pack(side=LEFT, padx=4, fill=X, expand=True)
         cb_host = ttk.Frame(body)
         cb_host.pack(fill=X)
+        cb_host.columnconfigure(0, weight=1)
         selected_names = explicit_branch_selection(
-            g.selected_branch_names, branch_names, legacy_empty_means_all=True,
+            g.selected_branch_names, branch_names, legacy_empty_means_all=False,
         )
         selected = set(selected_names)
         branch_vars: dict[str, tk.BooleanVar] = {}
@@ -1515,7 +1553,7 @@ class FissionMindmapPanel:
                 bv = tk.BooleanVar(value=(bn in selected))
                 branch_vars[bn] = bv
                 self._checkbutton(cb_host, text=bn, variable=bv, command=lambda: _refresh_summary()).pack(
-                    side=LEFT, padx=4, pady=1,
+                    anchor="w", padx=4, pady=1,
                 )
 
         def _refresh_summary(*_a):
@@ -1644,18 +1682,18 @@ class FissionMindmapPanel:
             return
         n = len(plan.source_groups) + 1
         out = (self.app.global_output_folder.get() or "").strip()
-        all_branches = [b.branch_name for b in self._branch_list()]
         g = FissionSourceGroup(
             group_id=new_group_id(),
             title=f"源组{n}",
             output_folder=out,
-            selected_branch_names=list(all_branches),
+            selected_branch_names=[],
         )
         # 新组展开，其它收起，方便看见刚加的那一行
         for old in plan.source_groups:
             if old.group_id:
                 self._sg_expanded[old.group_id] = False
         self._sg_expanded[g.group_id] = True
+        self._sg_active_group_id = g.group_id
         plan.source_groups.append(g)
         self._rebuild_source_group_cards()
         try:
@@ -1763,12 +1801,13 @@ class FissionMindmapPanel:
             self._folders.append(path)
         self._push_primary_folder()
 
-    def _hook_folder_drop(self, widget) -> None:
+    def _hook_folder_drop(self, widget, on_drop=None) -> None:
+        callback = on_drop or self._on_folders_dropped
         try:
             from modules.folder_drop import hook_folder_drop
 
             def _register() -> None:
-                ok = hook_folder_drop(widget, self._on_folders_dropped)
+                ok = hook_folder_drop(widget, callback)
                 if not ok and widget is getattr(self, "_drop_lbl", None):
                     self._drop_lbl.config(text="点击添加文件夹（需 pip install windnd）")
 
@@ -1776,12 +1815,114 @@ class FissionMindmapPanel:
         except Exception:
             pass
 
-    def _on_folders_dropped(self, dirs: list[str]) -> None:
+    def _apply_multi_source_folder_drop(
+        self, paths: list[str], *, target_group_id: str | None = None,
+    ) -> int:
+        """多源模式：拖入文件夹写入源组输入；多文件夹时其余新建源组。"""
+        plan = getattr(self.app, "_fission_plan", None)
+        if plan is None or not paths:
+            return 0
+
+        self.sync_groups_to_plan()
+        assigned = 0
+        pending = list(paths)
+
+        def _find_group(gid: str) -> FissionSourceGroup | None:
+            for g in plan.source_groups:
+                if g.group_id == gid:
+                    return g
+            return None
+
+        def _first_empty_group() -> FissionSourceGroup | None:
+            for g in plan.source_groups:
+                if not (g.input_folder or "").strip():
+                    return g
+            return None
+
+        def _set_input(g: FissionSourceGroup, path: str) -> None:
+            nonlocal assigned
+            g.input_folder = path
+            assigned += 1
+            if g.group_id:
+                self._sg_active_group_id = g.group_id
+                self._sg_expanded[g.group_id] = True
+
+        def _append_group(path: str) -> bool:
+            nonlocal assigned
+            if len(plan.source_groups) >= MAX_SOURCE_GROUPS:
+                return False
+            n = len(plan.source_groups) + 1
+            out = (self.app.global_output_folder.get() or "").strip()
+            g = FissionSourceGroup(
+                group_id=new_group_id(),
+                title=f"源组{n}",
+                input_folder=path,
+                output_folder=out,
+                selected_branch_names=[],
+            )
+            for old in plan.source_groups:
+                if old.group_id:
+                    self._sg_expanded[old.group_id] = False
+            self._sg_expanded[g.group_id] = True
+            self._sg_active_group_id = g.group_id
+            plan.source_groups.append(g)
+            assigned += 1
+            return True
+
+        if target_group_id and pending:
+            g = _find_group(target_group_id)
+            if g is not None:
+                _set_input(g, pending.pop(0))
+
+        while pending:
+            path = pending.pop(0)
+            if target_group_id is None and assigned == 0:
+                g = None
+                active = (getattr(self, "_sg_active_group_id", "") or "").strip()
+                if active and self._sg_expanded.get(active, False):
+                    g = _find_group(active)
+                if g is None:
+                    g = _first_empty_group()
+                if g is None and plan.source_groups:
+                    g = plan.source_groups[0]
+                if g is not None:
+                    _set_input(g, path)
+                    continue
+            if not _append_group(path):
+                messagebox.showinfo(
+                    "提示", f"最多 {MAX_SOURCE_GROUPS} 个源素材组。", parent=self.root,
+                )
+                break
+
+        if paths:
+            self.app.global_input_folder.set(paths[0])
+        self._rebuild_source_group_cards()
+        self.sync_groups_to_plan()
+        self.redraw()
+        return assigned
+
+    def _on_folders_dropped(self, dirs: list[str], *, target_group_id: str | None = None) -> None:
+        paths = [
+            os.path.normpath(p) for p in dirs
+            if p and os.path.isdir(os.path.normpath(p))
+        ]
+        if not paths:
+            return
+
+        if self._io_mode.get() == "多源":
+            def _finish_multi() -> None:
+                n = self._apply_multi_source_folder_drop(paths, target_group_id=target_group_id)
+                if n:
+                    self._toast(f"已设置 {n} 个源组输入")
+
+            try:
+                self.root.after_idle(_finish_multi)
+            except Exception:
+                _finish_multi()
+            return
+
         added = 0
-        for path in dirs:
-            path = os.path.normpath(path)
-            if not os.path.isdir(path):
-                continue
+        for path in paths:
             if path not in self._folders:
                 self._folders.append(path)
                 added += 1
@@ -1799,13 +1940,13 @@ class FissionMindmapPanel:
             _finish()
 
     def _open_naming_for_output(self) -> None:
-        """打开规范命名并指向裂变输出根（含子文件夹扫描）。"""
+        """打开规范命名并指向裂变输出根（默认不含子文件夹，需时在命名页勾选）。"""
         last = (getattr(self.app, "_last_fission_out_root", "") or "").strip()
         out = (self.app.global_output_folder.get() or "").strip()
         target = last if last and os.path.isdir(last) else out
         opener = getattr(self.app, "open_naming_for_folder", None)
         if callable(opener) and target:
-            opener(target, scan_subfolders=True)
+            opener(target, scan_subfolders=False)
             return
         if hasattr(self.app, "open_naming_tool"):
             self.app.open_naming_tool()
@@ -2055,13 +2196,16 @@ class FissionMindmapPanel:
                 tk.Label(row, text=str(order_map.get(j, "")), bg=row_bg, fg=color, font=("Microsoft YaHei", 11, "bold"), width=2).pack(side=RIGHT, padx=6)
 
     def _resolve_cfg_copy(self, branch: FissionBranch) -> dict:
+        from modules.fission_engine import apply_config_legacy_defaults, resolve_branch_config
+
         if isinstance(branch.embedded_config, dict):
-            return copy.deepcopy(branch.embedded_config)
+            return apply_config_legacy_defaults(branch.embedded_config)
         try:
             import video_batch_tool_v20 as v20
-            from modules.fission_engine import resolve_branch_config
 
-            return copy.deepcopy(resolve_branch_config(branch, templates_dir=v20._templates_dir()))
+            return apply_config_legacy_defaults(
+                resolve_branch_config(branch, templates_dir=v20._templates_dir()),
+            )
         except Exception:
             return {}
 
@@ -2123,14 +2267,20 @@ class FissionMindmapPanel:
                     self.app.fission_tree.selection_set(str(self._selected_idx))
                 except Exception:
                     pass
-        # 方案库变更后，多源模式下合并各组勾选（新方案默认不勾）
+        # 方案库变更后，多源模式下各组独立保留勾选；新方案仅挂到当前编辑源组
         try:
+            new_names = [b.branch_name for b in self._branch_list()]
+            old_names = list(getattr(self, "_sg_last_branch_names", None) or [])
             if self._io_mode.get() == "多源":
                 plan = getattr(self.app, "_fission_plan", None)
-                if plan is not None and hasattr(self, "_sg_cards") and self._sg_cards:
-                    self.sync_groups_to_plan()
-                    new_names = [b.branch_name for b in self._branch_list()]
-                    old_names = getattr(self, "_sg_last_branch_names", None) or new_names
+                if plan is not None:
+                    if hasattr(self, "_sg_cards") and self._sg_cards:
+                        self.sync_groups_to_plan()
+                    old_san = {sanitize_branch_name(n) for n in old_names if str(n).strip()}
+                    added = [
+                        n for n in new_names
+                        if sanitize_branch_name(n) not in old_san
+                    ]
                     if new_names != old_names:
                         for g in plan.source_groups:
                             g.selected_branch_names = merge_branch_selection_after_plan_change(
@@ -2138,11 +2288,23 @@ class FissionMindmapPanel:
                                 list(old_names),
                                 list(new_names),
                             )
-                    self._sg_last_branch_names = list(new_names)
+                        if added:
+                            target_gid = (getattr(self, "_sg_active_group_id", "") or "").strip()
+                            target = next(
+                                (g for g in plan.source_groups if g.group_id == target_gid),
+                                None,
+                            )
+                            if target is None:
+                                expanded = [
+                                    g for g in plan.source_groups
+                                    if g.group_id and self._sg_expanded.get(g.group_id)
+                                ]
+                                target = expanded[0] if len(expanded) == 1 else None
+                            if target is not None:
+                                attach_branches_to_group_selection(target, new_names, added)
                 if hasattr(self, "_rebuild_source_group_cards"):
                     self._rebuild_source_group_cards()
-            else:
-                self._sg_last_branch_names = [b.branch_name for b in self._branch_list()]
+            self._sg_last_branch_names = list(new_names)
         except Exception:
             pass
         if self._layout_mode.get() == "地铁线路":
@@ -2849,7 +3011,13 @@ class FissionMindmapPanel:
             add_entry(4, "自定义 Y", "mov_watermark_y", default="0")
             add_entry(5, "自定义 W", "mov_watermark_w", default="0")
             add_entry(6, "自定义 H", "mov_watermark_h", default="0")
-            add_check(7, "颜色保护（先缩放再去预乘）", "mov_color_protect")
+            from modules.fission_engine import resolve_mov_color_protect
+
+            cp_var = BooleanVar(value=resolve_mov_color_protect(cfg))
+            bool_fields["mov_color_protect"] = cp_var
+            self._checkbutton(form, text="颜色保护（先反预乘再缩放）", variable=cp_var).grid(
+                row=7, column=0, columnspan=2, sticky="w", pady=4, padx=6,
+            )
             ttk.Label(
                 form, text="自定义坐标也可在批处理页用「预览并定位」拖拽生成",
                 foreground="gray", font=("", 8), wraplength=420,

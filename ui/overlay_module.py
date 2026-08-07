@@ -29,8 +29,9 @@ SNAP_MARGIN = 10
 LAYER_COLORS = {"bg": "#95A5A6", "video": "#4A90D9", "logo": "#E67E22"}
 
 
-def _subprocess_flags():
-    return subprocess.CREATE_NO_WINDOW if __import__("sys").platform == "win32" else 0
+def _hidden_subprocess_kwargs() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 class OverlayModule(ttk.Frame):
@@ -1303,7 +1304,7 @@ class OverlayModule(ttk.Frame):
                         self.bg_path, vf, self.logo_path, outp, cur_vpos, cur_lpos, dur,
                     )
                     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       creationflags=_subprocess_flags())
+                                       **_hidden_subprocess_kwargs())
                     if r.returncode == 0:
                         ok += 1
                         self.log_fn(f"可视化叠加 [{i}/{len(tasks)}] 完成：{outp.name}")

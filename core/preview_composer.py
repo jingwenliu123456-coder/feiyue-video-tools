@@ -13,8 +13,9 @@ except ImportError:
     Image = None  # type: ignore
 
 
-def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+def _hidden_kw() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 def parse_ratio_size(ratio_str: str, ratio_sizes: dict[str, tuple[int, int]]) -> tuple[int, int]:
@@ -73,7 +74,7 @@ def extract_frame_png(ffmpeg: str, media_path: str, ss: float, out_png: str) -> 
             [ffmpeg, "-y", "-ss", str(max(0.0, ss)), "-i", media_path, "-vframes", "1", out_png],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=_subprocess_flags(),
+            **_hidden_kw(),
         )
         return r.returncode == 0 and Path(out_png).is_file()
     except Exception:

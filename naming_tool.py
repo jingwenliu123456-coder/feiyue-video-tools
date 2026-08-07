@@ -167,6 +167,7 @@ def default_config() -> dict[str, Any]:
         "legacy_strip_regex": False,
         "legacy_dash_keep": False,
         "legacy_dash_n": 2,
+        "rules_on_original": False,
         "rename_source": "",
         "rename_target": "",
         "rename_mode": "click",
@@ -297,6 +298,7 @@ class NamingToolApp:
         self.rename_target_var = tk.StringVar()
         self.rename_mode = tk.StringVar(value="click")
         self.scan_subfolders_var = tk.BooleanVar(value=False)
+        self.rules_on_original_var = tk.BooleanVar(value=False)
         self.preview_status_var = tk.StringVar(value="请选择文件夹后点「扫描」")
         self.batch_field_var = tk.StringVar(value="语言")
         self.batch_value_var = tk.StringVar()
@@ -421,6 +423,11 @@ class NamingToolApp:
 
         add_theme_menu(self.root, on_change=_on_theme_change, on_save=_save_ui_theme)
 
+    @staticmethod
+    def _hidden_kw() -> dict:
+        from modules.platform_utils import hidden_subprocess_kwargs
+        return hidden_subprocess_kwargs()
+
     def open_video_tool(self) -> None:
         """启动视频批处理工具（与主程序「规范命名」入口对称）。"""
         base = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(_ROOT)
@@ -437,7 +444,7 @@ class NamingToolApp:
         elif target.suffix == ".app":
             cmd = ["open", "-a", str(target)]
             try:
-                subprocess.Popen(cmd, cwd=str(base))
+                subprocess.Popen(cmd, cwd=str(base), **self._hidden_kw())
                 self._set_status("已启动视频批处理工具")
             except OSError as e:
                 messagebox.showerror("错误", f"无法启动视频工具:\n{e}")
@@ -445,7 +452,7 @@ class NamingToolApp:
         else:
             cmd = [str(target)]
         try:
-            subprocess.Popen(cmd, cwd=str(base))
+            subprocess.Popen(cmd, cwd=str(base), **self._hidden_kw())
             self._set_status("已启动视频批处理工具")
         except OSError as e:
             messagebox.showerror("错误", f"无法启动视频工具:\n{e}")
@@ -762,6 +769,12 @@ class NamingToolApp:
             self._rules_expanded,
             command=self._toggle_rules_panel,
         ).pack(side=tk.LEFT)
+        make_checkbutton(
+            rules_hdr,
+            "仅微调原文件名（跳过规范命名）",
+            self.rules_on_original_var,
+            command=self._on_rules_on_original_toggle,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
         self._rules_body = ttk.Frame(preview_frame)
         # 默认收起，不 grid
@@ -1731,6 +1744,7 @@ class NamingToolApp:
             "legacy_strip_regex": bool(self.legacy_strip_regex_var.get()),
             "legacy_dash_keep": bool(self.legacy_dash_keep_var.get()),
             "legacy_dash_n": self._legacy_dash_n(),
+            "rules_on_original": bool(self.rules_on_original_var.get()),
             "rename_source": self.rename_source_var.get().strip(),
             "rename_target": self.rename_target_var.get().strip(),
             "rename_mode": self.rename_mode.get(),
@@ -1821,6 +1835,7 @@ class NamingToolApp:
                 mode = "click"
             self.rename_mode.set(mode)
             self.scan_subfolders_var.set(bool(cfg.get("scan_subfolders", False)))
+            self.rules_on_original_var.set(bool(cfg.get("rules_on_original", False)))
             if cfg.get("ui_theme"):
                 self.root._ui_theme = str(cfg["ui_theme"])  # noqa: SLF001
             self._current_tag_type = self.type_combo.get() or "chat"
@@ -2590,6 +2605,11 @@ class NamingToolApp:
             fields=fields,
         )
 
+    def _on_rules_on_original_toggle(self) -> None:
+        self._schedule_save()
+        if self._rules_expanded.get() and self._preview_rows:
+            self._apply_rename_chain(preview_only=True, silent=True)
+
     def _preview_rename_rules(self) -> None:
         """F9：按六块规则链预览勾选行的新文件名。"""
         self._apply_rename_chain(preview_only=True)
@@ -2619,10 +2639,22 @@ class NamingToolApp:
         lib = self._full_tag_library()
         start = self._start_index()
         kw = self._filename_kwargs()
+        rules_on_original = bool(self.rules_on_original_var.get())
+
+        def _rule_base_name(row: dict[str, Any]) -> str:
+            if rules_on_original:
+                return str(row.get("old") or "")
+            return str(row.get("new") or row.get("old") or "")
 
         def _reset_selected_baseline() -> None:
             for row in selected:
                 row["manual_edit"] = False
+                if rules_on_original:
+                    base = str(row.get("old") or "")
+                    row["computed_new"] = base
+                    row["new"] = base
+                    row["note"] = "仅微调原文件名"
+                    continue
                 try:
                     list_index = self._preview_rows.index(row)
                 except ValueError:
@@ -2648,7 +2680,7 @@ class NamingToolApp:
                 list_index = self._preview_rows.index(row)
             except ValueError:
                 list_index = 0
-            name = str(row.get("new") or row.get("old") or "")
+            name = _rule_base_name(row)
             if not name:
                 continue
             meta_ctx = self._meta_context_for_row(row, list_index)
@@ -2657,6 +2689,8 @@ class NamingToolApp:
             if new_name != name:
                 row["new"] = new_name
                 row["manual_edit"] = True
+                if rules_on_original:
+                    row["note"] = "原文件名微调"
                 changed += 1
         self._fill_preview_tree()
         if silent:

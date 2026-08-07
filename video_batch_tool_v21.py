@@ -164,7 +164,8 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._ensure_core_config_vars()
         self._batch_ctl = BatchRunController(self)
         super().__init__(root)
-        self.root.title(APP_TITLE)
+        if not getattr(root, "_habi_workbench_v24", False):
+            self.root.title(APP_TITLE)
         self._bind_batch_hotkeys()
         try:
             if hasattr(self, "main_title_label"):
@@ -591,7 +592,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
         make_checkbutton(
             frame,
-            text="颜色保护（去发灰/发黑；略慢但仍是秒级）",
+            text="颜色保护（去发灰/发黑；先反预乘再缩放，比旧版 geq 快）",
             variable=self.mov_color_protect,
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
@@ -1444,12 +1445,16 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         if not isinstance(cfg, dict):
             cfg = {}
         try:
+            from modules.fission_engine import resolve_mov_color_protect
+
             for attr, key, default in self._v21_extra_field_specs():
                 var = getattr(self, attr, None)
                 if var is None:
                     continue
                 try:
-                    if isinstance(default, bool):
+                    if key == "mov_color_protect":
+                        var.set(resolve_mov_color_protect(cfg))
+                    elif isinstance(default, bool):
                         var.set(bool(cfg.get(key, default)))
                     else:
                         val = cfg.get(key, default)
@@ -1965,7 +1970,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                 f"拼接落版={self._is_enabled('ending_enable')}"
             )
             if self._is_enabled("enable_mov_watermark") and self._is_enabled("mov_color_protect"):
-                self.log("提示：已开「颜色保护」（先缩放再去预乘，颜色更干净，仍保持秒级）")
+                self.log("提示：已开「颜色保护」（先反预乘再缩放，减轻半透明发灰）")
             self.log("快捷键：空格=暂停/继续 · Esc=停止")
 
             total = len(files)

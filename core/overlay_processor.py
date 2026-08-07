@@ -63,10 +63,11 @@ def probe_video_geometry(ffprobe: str, path: str | Path) -> tuple[int, int, int]
     if not p.is_file():
         return 1920, 1080, 0
     try:
-        from core.overlay_engine import _subprocess_flags
-        flags = _subprocess_flags()
+        from modules.platform_utils import merge_subprocess_kwargs
+
+        pop_kw = merge_subprocess_kwargs({})
     except Exception:
-        flags = 0
+        pop_kw = {}
     try:
         r = subprocess.run(
             [
@@ -79,7 +80,7 @@ def probe_video_geometry(ffprobe: str, path: str | Path) -> tuple[int, int, int]
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=flags,
+            **pop_kw,
         )
         if r.returncode != 0:
             return 1920, 1080, 0
@@ -124,11 +125,11 @@ def probe_media_duration(ffprobe: str, path: str | Path) -> float:
     except Exception:
         pass
     try:
-        from core.overlay_engine import _subprocess_flags
+        from modules.platform_utils import merge_subprocess_kwargs
 
-        flags = _subprocess_flags()
+        pop_kw = merge_subprocess_kwargs({})
     except Exception:
-        flags = 0
+        pop_kw = {}
     try:
         r = subprocess.run(
             [
@@ -141,7 +142,7 @@ def probe_media_duration(ffprobe: str, path: str | Path) -> float:
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=flags,
+            **pop_kw,
         )
         if r.returncode == 0 and (r.stdout or "").strip():
             v = float(r.stdout.strip())
@@ -158,10 +159,11 @@ def probe_has_audio(ffprobe: str, path: str | Path) -> bool:
     if not p.is_file():
         return False
     try:
-        from core.overlay_engine import _subprocess_flags
-        flags = _subprocess_flags()
+        from modules.platform_utils import merge_subprocess_kwargs
+
+        pop_kw = merge_subprocess_kwargs({})
     except Exception:
-        flags = 0
+        pop_kw = {}
     try:
         r = subprocess.run(
             [ffprobe, "-v", "error", "-show_streams", "-of", "json", str(p)],
@@ -170,7 +172,7 @@ def probe_has_audio(ffprobe: str, path: str | Path) -> bool:
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=flags,
+            **pop_kw,
         )
         if r.returncode != 0:
             return False

@@ -55,6 +55,14 @@ fi
 if [[ -f "给Mac同事-打包与使用说明.md" ]]; then
   cp "给Mac同事-打包与使用说明.md" "$RELEASE/"
 fi
+if [[ -d "templates" ]]; then
+  mkdir -p "$RELEASE/templates"
+  cp templates/*.json "$RELEASE/templates/" 2>/dev/null || true
+  echo "  OK: templates/"
+fi
+if [[ -f "README_使用说明.txt" ]]; then
+  cp "README_使用说明.txt" "$RELEASE/"
+fi
 
 echo "[5/5] 去除隔离属性（本机测试用）..."
 xattr -cr "$RELEASE/HabiVideoTool.app" 2>/dev/null || true

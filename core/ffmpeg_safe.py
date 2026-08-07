@@ -47,7 +47,17 @@ _output_locks: dict[str, threading.Lock] = {}
 
 
 def _subprocess_flags() -> int:
-    return subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    from modules.platform_utils import subprocess_flags
+    return subprocess_flags()
+
+
+def _hidden_popen_kwargs(creationflags: int | None = None) -> dict:
+    from modules.platform_utils import merge_subprocess_kwargs
+
+    kw = merge_subprocess_kwargs({})
+    if creationflags is not None:
+        kw["creationflags"] = int(kw.get("creationflags", 0)) | int(creationflags)
+    return kw
 
 
 def _lock_for(path: str) -> threading.Lock:
@@ -145,7 +155,7 @@ def probe_media_ok(
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=_subprocess_flags(),
+            **_hidden_popen_kwargs(),
         )
     except Exception as e:
         return False, str(e)
@@ -170,7 +180,7 @@ def probe_media_ok(
             text=True,
             encoding="utf-8",
             errors="ignore",
-            creationflags=_subprocess_flags(),
+            **_hidden_popen_kwargs(),
         )
     except Exception as e:
         return False, str(e)
@@ -304,6 +314,7 @@ def run_ffmpeg_safe(
             cmd = cmd[:idx] + [temp_path] + cmd[idx + 1 :]
 
     flags = creationflags if creationflags is not None else _subprocess_flags()
+    pop_kw = _hidden_popen_kwargs(flags)
     use_poll = callable(poll_cb)
     try:
         if use_poll:
@@ -316,7 +327,7 @@ def run_ffmpeg_safe(
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                creationflags=flags,
+                **pop_kw,
             )
             stderr_chunks: list[str] = []
             reader = threading.Thread(
@@ -384,7 +395,7 @@ def run_ffmpeg_safe(
                 text=True,
                 encoding="utf-8",
                 errors="ignore",
-                creationflags=flags,
+                **pop_kw,
             )
     except Exception as e:
         _cleanup(temp_path)

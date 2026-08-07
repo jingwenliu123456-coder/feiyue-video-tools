@@ -20,6 +20,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import BOTH, BOTTOM, END, LEFT, RIGHT, TOP, VERTICAL, X, Y, BooleanVar, Canvas, Frame, StringVar, TclError, filedialog, messagebox, ttk
 
+from typing import Any, Callable
+
 import video_batch_tool_v20 as v20
 from modules import asset_library as alib
 from modules.platform_utils import config_path, is_mac, set_tk_window_icon, ui_pause_label, ui_queue_expand_hint, ui_settings_label, ui_start_batch_label, ui_stop_label, ui_warning_prefix, use_ui_emoji
@@ -57,13 +59,25 @@ from ui.three_column_layout import ThreeColumnLayout, collapsible_section
 from video_batch_tool_v21 import VideoBatchToolV21
 from video_batch_tool_v23 import VideoBatchToolV23 as _V23
 
-APP_TITLE = "飞跃视频批处理工具"
+APP_TITLE = "飞跃视频工具"
+
+_TK_LABEL_ANCHORS = frozenset({"n", "ne", "e", "se", "s", "sw", "w", "nw", "center"})
+
+
+def _tk_label_anchor(anchor: str) -> str:
+    """Tk Label.anchor 只接受 n/ne/e/…，将 right/left 等别名映射为合法值。"""
+    a = (anchor or "w").strip().lower()
+    if a in ("right", "rtl"):
+        return "e"
+    if a in ("left", "ltr"):
+        return "w"
+    return a if a in _TK_LABEL_ANCHORS else "w"
 
 _FEATURE_SPECS: list[tuple[str, str, str]] = [
     ("cut", "视频裁切", "build_cut_section"),
     ("ratio", "比例适配", "build_ratio_section"),
     ("mov_wm", "动态水印", "build_mov_wm_section"),
-    ("png_wm", "静态水印", "build_audio_replace_section"),
+    ("png_wm", "静态水印", "build_png_wm_section"),
     ("layer", "浮层落版", "build_layer_section"),
     ("ending", "拼接落版", "build_ending_section"),
     ("overlay", "可视化叠加", "build_overlay_grid_section"),
@@ -135,6 +149,12 @@ class VideoBatchToolV24(_V23):
         self._pause_event = threading.Event()
         self._pause_event.set()
         self._is_paused = False
+        try:
+            root._habi_workbench_v24 = True  # noqa: SLF001
+            root.title(APP_TITLE)
+            root.withdraw()
+        except TclError:
+            pass
         super().__init__(root)
         self._wrap_batch_ctl_ui()
         self._load_user_pipeline_order()
@@ -152,19 +172,123 @@ class VideoBatchToolV24(_V23):
             pass
         self._bind_workspace_traces()
         self._bind_feature_traces()
-        self.root.after_idle(self._deferred_startup_refresh)
-        self.root.after_idle(self._after_config_loaded)
+        self._ui_ready = False
+        self._startup_finalize_done = False
+        self.root.after_idle(self._startup_finalize)
 
-    def _deferred_startup_refresh(self) -> None:
-        """延后刷新，避免启动时与 build_ui / 主题叠加卡顿。"""
+    def _startup_finalize(self) -> None:
+        """先弹出主窗口，重刷新放到显示之后（缩短 splash 停留）。"""
+        if self._startup_finalize_done:
+            return
+        self._startup_finalize_done = True
         try:
-            self._refresh_input_tree()
             self._refresh_output_preview()
-            self._refresh_asset_tree()
+            self._refresh_footer_status()
+            self._prepare_feature_order_from_config()
+            self._sync_feature_panels(deep_theme=False)
+        except Exception:
+            pass
+        self._ui_ready = True
+        cb = getattr(self.root, "_on_startup_ready", None)
+        if callable(cb):
+            try:
+                cb()
+            except Exception:
+                pass
+        try:
+            self.root.after_idle(self._post_startup_refresh)
         except Exception:
             pass
 
-    def _apply_app_skin(self, skin_label: str, *, from_fission: bool = False) -> None:
+    def _prepare_feature_order_from_config(self) -> None:
+        try:
+            self._infer_layer_from_legacy()
+            self._sync_layer_to_legacy()
+        except Exception:
+            pass
+        self._feature_enable_order = [
+            k for k in self._batch_pipeline_order() if self._batch_step_enabled(k)
+        ]
+
+    def _post_startup_refresh(self) -> None:
+        """主界面已显示后再做目录扫描、资产库、功能面板展开等较重操作。"""
+        try:
+            self._sync_feature_panels(deep_theme=True)
+            self._refresh_input_tree()
+            self._refresh_asset_tree()
+            if not getattr(self, "_memory_applied", False):
+                self._memory_applied = True
+                self.root.after(120, self._apply_global_memory)
+        except Exception:
+            pass
+
+    def _deferred_startup_refresh(self) -> None:
+        """兼容旧调用：合并进 post_startup。"""
+        self._post_startup_refresh()
+
+    def _ensure_ui_queue(self) -> None:
+        if getattr(self, "_ui_queue", None) is None:
+            import queue
+
+            self._ui_queue = queue.SimpleQueue()
+
+    def _pump_ui_queue(self) -> None:
+        q = getattr(self, "_ui_queue", None)
+        if q is None:
+            return
+        import queue as queue_mod
+
+        while True:
+            try:
+                fn = q.get_nowait()
+            except queue_mod.Empty:
+                break
+            try:
+                fn()
+            except Exception as exc:
+                try:
+                    self.log(f"UI 回调异常: {exc}")
+                except Exception:
+                    import sys
+                    print(f"UI 回调异常: {exc}", file=sys.stderr)
+        try:
+            if q.qsize():
+                self.root.after(0, self._pump_ui_queue)
+        except RuntimeError:
+            pass
+
+    def _enqueue_ui(self, fn: Callable[[], None]) -> None:
+        """任意线程安全：回调排到 Tk 主线程（mainloop 未启动时先入队）。"""
+        self._ensure_ui_queue()
+        self._ui_queue.put(fn)
+        try:
+            self.root.after(0, self._pump_ui_queue)
+        except RuntimeError:
+            pass
+
+    def _sync_panel_progress(self) -> None:
+        panel = getattr(self, "_panel_progress", None)
+        main = getattr(self, "progress", None)
+        if panel is None or main is None:
+            return
+        try:
+            panel["maximum"] = main["maximum"]
+            panel["value"] = main["value"]
+        except Exception:
+            pass
+
+    def update_progress_ui(self, current: int, total: int, start_time: float | None = None, failed: int = 0) -> None:
+        super().update_progress_ui(current, total, start_time, failed)
+        self._sync_panel_progress()
+
+    def _set_batch_step_status(self, idx: int, total: int, step: str = "") -> None:
+        super()._set_batch_step_status(idx, total, step)
+        try:
+            self.root.after_idle(self._sync_panel_progress)
+        except Exception:
+            pass
+
+    def _apply_app_skin(self, skin_label: str, *, from_fission: bool = False, sync_recolor: bool = False) -> None:
         """全应用统一皮肤：批处理 / 规范命名 / 批量裂变同一套配色。"""
         label = (skin_label or "简约工作台").strip()
         if label not in APP_SKIN_LABELS:
@@ -234,7 +358,10 @@ class VideoBatchToolV24(_V23):
             except Exception as exc:
                 print(f"主题刷新异常: {exc}")
 
-        self.root.after_idle(_delayed_recolor)
+        if sync_recolor:
+            _delayed_recolor()
+        else:
+            self.root.after_idle(_delayed_recolor)
 
         self.root._ui_theme = UI_THEME_NONE if none_mode else label  # noqa: SLF001
         self._card_colors = card_colors(dark=dark)
@@ -505,7 +632,15 @@ class VideoBatchToolV24(_V23):
         return shell, hdr, body
 
     def _grid_card(self, card, row, col, *, colspan=1, rowspan=1, sticky="nsew"):
+        """历史名 grid_card；实际用 pack 纵向堆叠（row/col 参数保留兼容父类）。"""
+        self._pack_card(card, row, col, colspan=colspan, rowspan=rowspan, sticky=sticky)
+
+    def _pack_card(self, card, row, col, *, colspan=1, rowspan=1, sticky="nsew"):
         card.pack(fill=X, pady=(0, 12))
+
+    def build_png_wm_section(self, row, col):
+        """静态 PNG 水印（V21 中历史方法名 build_audio_replace_section）。"""
+        return self.build_audio_replace_section(row, col)
 
     def create_scrollable_canvas(self):
         apply_workbench_root(self.root)
@@ -535,7 +670,6 @@ class VideoBatchToolV24(_V23):
         self._fission_host = ttk.Frame(fission_tab)
         self._fission_host.pack(fill=BOTH, expand=True)
 
-        self.canvas = Canvas(self.main_frame, highlightthickness=0, bg=WB_BG, height=1)
         self._log_outer = ttk.Frame(self.main_frame)
         self._fission_panel = None
 
@@ -622,7 +756,6 @@ class VideoBatchToolV24(_V23):
         ).pack(side=LEFT)
 
         self.template_var = StringVar()
-        self.template_combo = ttk.Combobox(left_hdr, textvariable=self.template_var, width=1)
 
         status_wrap = Frame(self.root, bg=WB_CARD, highlightthickness=1, highlightbackground=WB_BORDER)
         status_wrap.pack(fill=X, side=BOTTOM)
@@ -663,6 +796,23 @@ class VideoBatchToolV24(_V23):
             self._asset_mode_var.set(str(lib.get("mode") or "reference"))
         except Exception:
             pass
+
+    def check_ffmpeg(self) -> None:
+        """后台检测 FFmpeg，避免阻塞 splash → 主界面。"""
+        from modules.platform_utils import SYSTEM, check_ffmpeg_available
+
+        def _worker() -> None:
+            ok, msg = check_ffmpeg_available(v20.FFMPEG_PATH, v20.FFPROBE_PATH)
+
+            def _log() -> None:
+                if ok:
+                    self.log(f"FFmpeg 已就绪（{SYSTEM}）")
+                else:
+                    self.log(f"FFmpeg 未就绪：{msg}")
+
+            self._enqueue_ui(_log)
+
+        threading.Thread(target=_worker, name="check-ffmpeg", daemon=True).start()
 
     def _batch_pipeline_order(self) -> list[str]:  # type: ignore[override]
         """优先裂变覆盖 → 用户自调顺序 → V22 布局顺序。"""
@@ -766,6 +916,7 @@ class VideoBatchToolV24(_V23):
 
         engine = SubtitleEngine(
             ffmpeg_path=v20.FFMPEG_PATH,
+            ffprobe_path=v20.FFPROBE_PATH,
             font_name=font_name,
         )
         tmp_video = self.get_temp(out, "subtitle_burn", ext="mp4")
@@ -775,6 +926,14 @@ class VideoBatchToolV24(_V23):
         if (srt_source or "").startswith("固定"):
             self.log(f"  固定字幕（应用到所有视频）: {Path(srt_path).name}")
         self.log(f"  字幕文件: {srt_path}")
+        try:
+            from core.overlay_processor import probe_video_geometry
+
+            bw, bh, brot = probe_video_geometry(v20.FFPROBE_PATH, current)
+            rot_note = f" · 旋转校正 {brot}°" if brot else ""
+            self.log(f"  烧录画布: {bw}×{bh}{rot_note}（与视频显示分辨率对齐，防拉扯）")
+        except Exception:
+            pass
         engine.burn_subtitles(current, srt_path, tmp_video)
         self.log(f"  烧录字体: {font_name}")
 
@@ -870,6 +1029,7 @@ class VideoBatchToolV24(_V23):
 
         engine = SubtitleEngine(
             ffmpeg_path=v20.FFMPEG_PATH,
+            ffprobe_path=v20.FFPROBE_PATH,
             whisper_model_size=model_size,
             device="cpu",
             compute_type="int8",
@@ -962,7 +1122,7 @@ class VideoBatchToolV24(_V23):
                 "  ⚠ Google 备用识别：长视频时间轴可能不准。"
                 "请运行 scripts\\setup_subtitle_env.bat 后重启工具"
             )
-            if duration_sec > 90 and seg_n <= 1:
+            if duration_sec is not None and duration_sec > 90 and seg_n <= 1:
                 self.log(
                     f"  ⚠ 视频约 {int(duration_sec)}s 但仅 {seg_n} 条字幕，"
                     "此 SRT 不适合直接使用，请修复 Whisper 后重跑"
@@ -1192,10 +1352,13 @@ class VideoBatchToolV24(_V23):
         if fission_res.get("kind") == "plan":
             plan_name = (fission_res.get("name") or "").strip()
             if plan_name:
+                self._ensure_fission_embedded()
                 self._load_fission_plan_quiet(plan_name)
         elif fission_res.get("kind") == "template":
             mount = (fission_res.get("name") or "").strip()
             if mount:
+                self._ensure_fission_embedded()
+                panel = getattr(self, "_fission_panel", None)
                 if panel is not None:
                     try:
                         panel.ensure_scheme_from_template(mount)
@@ -1246,7 +1409,7 @@ class VideoBatchToolV24(_V23):
         if w < 1180:
             wrap.pack_forget()
         elif not wrap.winfo_ismapped():
-            wrap.pack(fill=BOTH, expand=True)
+            wrap.pack(fill=X, pady=(4, 0))
 
     def _refresh_footer_status(self) -> None:
         name = (self.template_var.get() or "").strip() or "未选择"
@@ -1315,24 +1478,22 @@ class VideoBatchToolV24(_V23):
             self.main_frame = old_main
 
     def _after_config_loaded(self) -> None:
-        try:
-            self._infer_layer_from_legacy()
-        except Exception:
-            pass
-        try:
-            self._sync_layer_to_legacy()
-        except Exception:
-            pass
-        self._feature_enable_order = [
-            k for k in self._batch_pipeline_order() if self._batch_step_enabled(k)
-        ]
-        self._sync_feature_panels()
+        self._prepare_feature_order_from_config()
+        self._sync_feature_panels(deep_theme=True)
         self._refresh_workspace_sidebars()
         self._refresh_footer_status()
         self._refresh_asset_tree()
         if not getattr(self, "_memory_applied", False):
             self._memory_applied = True
             self.root.after(120, self._apply_global_memory)
+        # Whisper 检测改到勾选「字幕」后再跑，避免启动时弹黑窗口
+
+    def _maybe_log_subtitle_backend_hint(self) -> None:
+        if getattr(self, "_subtitle_backend_hint_logged", False):
+            return
+        if not self._batch_step_enabled("subtitle"):
+            return
+        self._subtitle_backend_hint_logged = True
         self.root.after(200, self._log_subtitle_backend_hint)
 
     def _log_subtitle_backend_hint(self) -> None:
@@ -1366,7 +1527,8 @@ class VideoBatchToolV24(_V23):
 
     def load_config(self):  # type: ignore[override]
         super().load_config()
-        self.root.after_idle(self._after_config_loaded)
+        if getattr(self, "_ui_ready", False):
+            self.root.after_idle(self._after_config_loaded)
 
     def load_selected_template(self) -> None:  # type: ignore[override]
         super().load_selected_template()
@@ -1375,16 +1537,16 @@ class VideoBatchToolV24(_V23):
     def open_naming_tool(self) -> None:
         last = getattr(self, "_last_fission_out_root", "") or ""
         if last and os.path.isdir(last):
-            self.open_naming_for_folder(last, scan_subfolders=True)
+            self.open_naming_for_folder(last, scan_subfolders=False)
             return
         if self._sheet is not None:
             try:
                 self._sheet.select(1)
             except Exception:
                 pass
-        self._sync_naming_folder(prefer_output=True, scan_subfolders=True)
+        self._sync_naming_folder(prefer_output=True, scan_subfolders=False)
 
-    def open_naming_for_folder(self, folder: str, *, scan_subfolders: bool = True) -> None:
+    def open_naming_for_folder(self, folder: str, *, scan_subfolders: bool = False) -> None:
         """打开规范命名并强制指向指定文件夹（裂变完成后用输出根）。"""
         folder = (folder or "").strip()
         if self._sheet is not None:
@@ -1397,7 +1559,7 @@ class VideoBatchToolV24(_V23):
             return
         app = self._naming_app
         if app is None:
-            self._embed_naming_tool()
+            self._ensure_naming_embedded()
             app = self._naming_app
         if app is None:
             return
@@ -1418,9 +1580,13 @@ class VideoBatchToolV24(_V23):
                 self._sheet.select(2)
             except Exception:
                 pass
+        self._ensure_fission_embedded()
         panel = getattr(self, "_fission_panel", None)
         if panel is not None:
             panel.refresh()
+
+    def _ensure_fission_embedded(self) -> None:
+        self._embed_fission_panel()
 
     def _embed_fission_panel(self) -> None:
         if getattr(self, "_fission_panel", None) is not None:
@@ -1596,8 +1762,8 @@ class VideoBatchToolV24(_V23):
                 self.global_output_folder.set(out_root)
             except Exception:
                 pass
-            # 静默把命名页指到批出目录（含子文件夹），切页即可看到成品
-            self._prime_naming_folder(out_root, scan_subfolders=True)
+            # 静默把命名页指到批出目录，默认仅当前文件夹（子文件夹需手动勾选）
+            self._prime_naming_folder(out_root, scan_subfolders=False)
         super()._on_fission_finished(out_root, n_branches)
         try:
             if not bool(habi_memory.prefs().get("auto_open_naming_after_fission")):
@@ -1607,11 +1773,11 @@ class VideoBatchToolV24(_V23):
                 f"要打开「规范命名」页，对输出目录统一改名吗？\n\n{out_root}",
                 parent=self.root,
             ):
-                self.open_naming_for_folder(out_root, scan_subfolders=True)
+                self.open_naming_for_folder(out_root, scan_subfolders=False)
         except Exception:
             pass
 
-    def _prime_naming_folder(self, folder: str, *, scan_subfolders: bool = True) -> None:
+    def _prime_naming_folder(self, folder: str, *, scan_subfolders: bool = False) -> None:
         """不切页，只把内嵌命名工具指向指定文件夹。"""
         folder = (folder or "").strip()
         if not folder:
@@ -1619,7 +1785,7 @@ class VideoBatchToolV24(_V23):
         app = self._naming_app
         if app is None:
             try:
-                self._embed_naming_tool()
+                self._ensure_naming_embedded()
             except Exception:
                 pass
             app = self._naming_app
@@ -1639,7 +1805,7 @@ class VideoBatchToolV24(_V23):
             self.log(f"命名页关联失败: {exc}")
 
     def _on_sheet_tab_changed(self, _event=None) -> None:
-        """切到「规范命名」时自动对齐：优先上次裂变输出根。"""
+        """切页时懒加载重页，并同步命名目录。"""
         sheet = self._sheet
         if sheet is None:
             return
@@ -1647,13 +1813,18 @@ class VideoBatchToolV24(_V23):
             idx = int(sheet.index(sheet.select()))
         except Exception:
             return
+        if idx == 1:
+            self._ensure_naming_embedded()
+        elif idx == 2:
+            self._ensure_fission_embedded()
+            return
         if idx != 1:
             return
         last = (getattr(self, "_last_fission_out_root", "") or "").strip()
         if last and os.path.isdir(last):
-            self._prime_naming_folder(last, scan_subfolders=True)
+            self._prime_naming_folder(last, scan_subfolders=False)
             return
-        self._sync_naming_folder(prefer_output=True, scan=True, scan_subfolders=True)
+        self._sync_naming_folder(prefer_output=True, scan=True, scan_subfolders=False)
 
     def _fission_refresh_tree(self) -> None:  # type: ignore[override]
         super()._fission_refresh_tree()
@@ -1703,6 +1874,9 @@ class VideoBatchToolV24(_V23):
             self.log(f"命名页已指向: {folder}")
         except Exception as exc:
             self.log(f"命名页同步失败: {exc}")
+
+    def _ensure_naming_embedded(self) -> None:
+        self._embed_naming_tool()
 
     def _embed_naming_tool(self) -> None:
         if self._naming_app is not None or self._naming_host is None:
@@ -1775,9 +1949,11 @@ class VideoBatchToolV24(_V23):
             self._feature_enable_order.remove(key)
         if on:
             self._feature_enable_order.insert(0, key)
+        if key == "subtitle" and on:
+            self.root.after_idle(self._maybe_log_subtitle_backend_hint)
         self.root.after_idle(self._sync_feature_panels)
 
-    def _sync_feature_panels(self) -> None:
+    def _sync_feature_panels(self, *, deep_theme: bool = True) -> None:
         if getattr(self, "_ui_batch_quiet", False):
             return
         if self._settings_inner is None:
@@ -1807,10 +1983,11 @@ class VideoBatchToolV24(_V23):
 
         self._update_settings_empty_hint()
         self._refresh_pipeline_bar()
-        try:
-            apply_workbench_ttk_deep(self._settings_inner)
-        except Exception:
-            pass
+        if deep_theme:
+            try:
+                apply_workbench_ttk_deep(self._settings_inner)
+            except Exception:
+                pass
         self._refresh_footer_status()
         if self._settings_canvas is not None:
             try:
@@ -1823,13 +2000,41 @@ class VideoBatchToolV24(_V23):
             except Exception:
                 pass
 
-    def on_close(self):  # type: ignore[override]
-        if getattr(self, "_processing", False) or getattr(self, "_fission_running", False):
-            if not messagebox.askyesno("正在处理中", "任务尚未结束，确定退出？"):
-                return
+    def _confirm_exit_if_busy(self) -> bool:
+        """运行中关闭窗口：返回 True 表示可继续退出。"""
+        if (
+            getattr(self, "_processing", False)
+            or getattr(self, "_fission_running", False)
+            or getattr(self, "_job_queue_running", False)
+        ):
+            return bool(messagebox.askyesno("正在处理中", "任务尚未结束，确定退出？"))
+        return True
+
+    def _save_window_state_on_exit(self) -> None:
+        try:
+            self.root.update_idletasks()
+            geo = self.root.geometry()
+            size = geo.split("+", 1)[0]
+            w_s, h_s = size.split("x", 1)
+            maximized = False
+            try:
+                maximized = str(self.root.state()) == "zoomed"
+            except Exception:
+                pass
+            habi_memory.update_window_state(width=int(w_s), height=int(h_s), maximized=maximized)
+            habi_memory.update_prefs(preview_panel_open=bool(self._preview_panel_open))
+        except Exception:
+            pass
+
+    def _finalize_close(self) -> None:
         from video_batch_tool_v20 import VideoBatchTool
 
         VideoBatchTool.on_close(self)
+
+    def on_close(self):  # type: ignore[override]
+        if not self._confirm_exit_if_busy():
+            return
+        self._finalize_close()
 
     def process_batch(self, *, silent: bool = False):  # type: ignore[override]
         super().process_batch(silent=silent)
@@ -1893,6 +2098,7 @@ class VideoBatchToolV24(_V23):
             pass
 
     def _build_settings_stack(self, parent) -> None:
+        # make_scroll 返回的 outer 尚未 pack/grid，由本方法负责布局
         canvas, outer, inner = make_scroll(parent)
         outer.grid(row=0, column=0, sticky="nsew")
         self._settings_canvas = canvas
@@ -1954,7 +2160,12 @@ class VideoBatchToolV24(_V23):
         fname = Path(path).name if path else ""
         valid = bool(asset.get("valid", True))
         type_label = alib.TYPE_LABELS.get(atype, atype)
+        apply_hint = str(asset.get("applyTarget") or "").strip()
+        if apply_hint == "mov_wm":
+            type_label = f"{type_label} · 动态水印"
         apply_key = {"watermark": "png_wm", "endcard": "layer", "overlay": "overlay"}.get(atype, "png_wm")
+        if apply_hint in {k for k, _, _ in _ASSET_APPLY_TARGETS}:
+            apply_key = apply_hint
         apply_label = {
             "png_wm": "套到水印", "layer": "套到落版", "overlay": "套到叠加", "mov_wm": "套到MOV",
         }.get(apply_key, "应用到功能")
@@ -1980,6 +2191,59 @@ class VideoBatchToolV24(_V23):
             btns, "删", lambda i=aid: self._asset_delete_by_id(i), kind="danger", width=3,
         ).pack(side=LEFT)
 
+    def _pick_video_asset_import_type(self) -> tuple[str, str] | None:
+        """
+        导入 .mov/.mp4/.webm 时让用户选择用途。
+        返回 (asset_type, apply_target)；apply_target 可为空（走类型默认映射）。
+        """
+        win = tk.Toplevel(self.root)
+        win.title("选择视频资产类型")
+        win.transient(self.root)
+        win.grab_set()
+        ttk.Label(
+            win,
+            text="该文件是视频，请指定入库类型：",
+            wraplength=320,
+        ).pack(anchor="w", padx=12, pady=(12, 6))
+
+        choice = StringVar(value="endcard")
+        options = (
+            ("落版视频（拼接/浮层落版）", "endcard", ""),
+            ("动态水印（MOV/MP4 全屏或自定义）", "other", "mov_wm"),
+            ("叠加素材（画布叠加）", "overlay", ""),
+        )
+        for label, _atype, _ in options:
+            ttk.Radiobutton(win, text=label, variable=choice, value=f"{_atype}|{_}").pack(
+                anchor="w", padx=16, pady=2,
+            )
+
+        picked: dict[str, tuple[str, str] | None] = {"value": None}
+
+        def ok() -> None:
+            raw = (choice.get() or "endcard|").split("|", 1)
+            atype = raw[0] if raw else "endcard"
+            target = raw[1] if len(raw) > 1 else ""
+            picked["value"] = (atype, target)
+            win.destroy()
+
+        def cancel() -> None:
+            picked["value"] = None
+            win.destroy()
+
+        bf = ttk.Frame(win)
+        bf.pack(fill=X, padx=12, pady=12)
+        ttk.Button(bf, text="取消", command=cancel).pack(side=RIGHT, padx=4)
+        ttk.Button(bf, text="确定", command=ok).pack(side=RIGHT)
+        try:
+            from ui.app_theme import apply_theme_to_window, register_themed_window
+
+            apply_theme_to_window(win, app=self)
+            register_themed_window(self, win)
+        except Exception:
+            pass
+        win.wait_window()
+        return picked["value"]
+
     def _asset_import_any(self) -> None:
         path = filedialog.askopenfilename(
             parent=self.root,
@@ -1989,12 +2253,22 @@ class VideoBatchToolV24(_V23):
         if not path:
             return
         ext = Path(path).suffix.lower()
+        apply_target = ""
         if ext in {".mov", ".mp4", ".webm"}:
-            asset_type = "endcard"
+            picked = self._pick_video_asset_import_type()
+            if not picked:
+                return
+            asset_type, apply_target = picked
         else:
             asset_type = "watermark"
         mode = self._asset_mode_var.get() or "copy"
-        item = alib.add_asset(config_path, path, asset_type=asset_type, mode=mode)  # type: ignore[arg-type]
+        item = alib.add_asset(
+            config_path,
+            path,
+            asset_type=asset_type,  # type: ignore[arg-type]
+            mode=mode,
+            apply_target=apply_target,
+        )
         if item:
             self.log(f"资产已入库: {item.get('name')}")
             self._refresh_asset_tree()
@@ -2031,9 +2305,14 @@ class VideoBatchToolV24(_V23):
             self._refresh_asset_tree()
             return
         atype = str(asset.get("type") or "other")
+        apply_hint = str(asset.get("applyTarget") or "").strip()
         default_key = {"watermark": "png_wm", "endcard": "layer", "overlay": "overlay"}.get(atype, "png_wm")
+        if apply_hint in {k for k, _, _ in _ASSET_APPLY_TARGETS}:
+            default_key = apply_hint
         # 常见类型直接一套；其余弹窗选目标
-        if default_key in {"png_wm", "layer", "overlay"} and atype != "other":
+        if default_key in {"png_wm", "layer", "overlay", "mov_wm"} and (
+            atype != "other" or apply_hint
+        ):
             self._asset_apply_to_key(asset, path, default_key)
             return
         win = tk.Toplevel(self.root)
@@ -2214,9 +2493,10 @@ class VideoBatchToolV24(_V23):
             try:
                 files = self._list_videos(folder)
             except Exception as exc:
-                self.root.after(0, lambda: self.log(f"扫描文件夹失败: {exc}"))
+                err = str(exc)
+                self._enqueue_ui(lambda e=err: self.log(f"扫描文件夹失败: {e}"))
                 return
-            self.root.after(0, lambda: self._apply_input_tree(folder, files))
+            self._enqueue_ui(lambda f=folder, fl=files: self._apply_input_tree(f, fl))
 
         threading.Thread(target=_worker, name="scan-input-folder", daemon=True).start()
 
@@ -2267,7 +2547,7 @@ class VideoBatchToolV24(_V23):
 
             self.root.after_idle(_register_drop)
         except Exception:
-            pass
+            drop_zone.config(text="拖放不可用，请用按钮选择文件夹")
         ttk.Label(body, textvariable=self._input_stats_var, foreground=WB_MUTED).pack(anchor="w")
         tree_wrap = ttk.Frame(body)
         # 勿 expand：否则会占满左栏高度，把下方「功能清单」挤出可视区
@@ -2299,7 +2579,7 @@ class VideoBatchToolV24(_V23):
         make_button(row, "保存", self.save_as_template, kind="outline", width=5).pack(side=LEFT, padx=2)
         make_button(row, "删", self.delete_selected_template, kind="danger", width=3).pack(side=LEFT)
         ttk.Label(body, textvariable=self._template_hint_var, foreground=WB_MUTED).pack(anchor="w", pady=(4, 0))
-        self.refresh_templates()
+        # refresh_templates 已在 _init_chrome 调用，此处不重复扫目录
 
         # 3) 功能清单（提前到常用素材上方，避免被挤出可视区）
         card, _hdr, body = self._module_card(body_host, "功能清单", "✅", "features")
@@ -2435,10 +2715,27 @@ class VideoBatchToolV24(_V23):
         make_button(body, "切换到命名页", self.open_naming_tool, kind="info").pack(fill=X)
         make_button(body, "保存配置", self.save_config, kind="outline").pack(fill=X, pady=(6, 0))
 
-        q_shell, q_hdr, q_body, _q_toggle = collapsible_section(
-            parent, "生产队列", icon="🧾", expanded=False,
+        adv_shell, _adv_hdr, adv_body, _adv_toggle = collapsible_section(
+            parent,
+            "高级 / 实验功能",
+            icon="🧪",
+            subtitle="日常可忽略",
+            expanded=False,
         )
-        q_shell.pack(fill=X, pady=(0, 10))
+        adv_shell.pack(fill=X, pady=(0, 10))
+        ttk.Label(
+            adv_body,
+            text="多批次排队、监视目录自动入队。日常单批处理用「开始处理」即可，不必展开此处。",
+            foreground=WB_MUTED,
+            wraplength=300,
+            font=("", 8),
+            justify="left",
+        ).pack(anchor="w", padx=4, pady=(0, 8))
+
+        q_shell, q_hdr, q_body, _q_toggle = collapsible_section(
+            adv_body, "生产队列", icon="🧾", expanded=False,
+        )
+        q_shell.pack(fill=X, pady=(0, 8))
         self._queue_badge = tk.Label(
             q_hdr, text="0", font=("Arial", 8, "bold"),
             bg=WB_BORDER, fg=WB_MUTED, width=3, relief="solid", bd=1,
@@ -2502,9 +2799,9 @@ class VideoBatchToolV24(_V23):
         q_vsb.pack(side=RIGHT, fill=Y)
 
         w_shell, w_hdr, w_body, _w_toggle = collapsible_section(
-            parent, "监视文件夹", icon="👁", expanded=False,
+            adv_body, "监视文件夹", icon="👁", expanded=False,
         )
-        w_shell.pack(fill=X, pady=(0, 10))
+        w_shell.pack(fill=X, pady=(0, 4))
         self._watch_indicator = tk.Label(
             w_hdr, text="●", font=("Arial", 11), fg="#cccccc", bg=WB_CARD,
         )
@@ -2563,15 +2860,12 @@ class VideoBatchToolV24(_V23):
             prog_row, textvariable=self.status_var, bg=WB_CARD, fg=WB_TEXT,
             font=("Microsoft YaHei", 9), anchor="w",
         ).pack(side=LEFT, fill=X, expand=True)
-        try:
-            self.progress.pack_forget()
-        except Exception:
-            pass
-        self.progress = ttk.Progressbar(
+        # 进度条保留在底部状态栏 self.progress；此处不可 pack 跨容器复用同一控件
+        self._panel_progress = ttk.Progressbar(
             prog_row, orient="horizontal", mode="determinate", length=120,
             style="Workbench.TProgressbar",
         )
-        self.progress.pack(side=RIGHT)
+        self._panel_progress.pack(side=RIGHT)
 
         self._log_outer = ttk.Frame(body)
         self._log_outer.pack(fill=BOTH, expand=True)
@@ -2835,9 +3129,11 @@ class VideoBatchToolV24(_V23):
                             except Exception as e:
                                 err_box["err"] = str(e)
 
+                        # 裂变在子线程跑；_fission_worker_groups 内 UI 更新须走 root.after(0, …)
                         t = threading.Thread(target=_run_fission, daemon=True)
                         t.start()
                         while t.is_alive() or getattr(self, "_fission_running", False) or getattr(self, "_processing", False):
+                            self._check_pause(timeout=0.2)
                             time.sleep(0.2)
                     else:
                         cfg = job.get("cfg") or {}
@@ -2867,6 +3163,7 @@ class VideoBatchToolV24(_V23):
                             err_box["err"] = str(e)
 
                         while getattr(self, "_processing", False):
+                            self._check_pause(timeout=0.2)
                             time.sleep(0.2)
 
                     success = not err_box
@@ -2940,6 +3237,22 @@ class VideoBatchToolV24(_V23):
         added = 0
         done_root = os.path.join(root_in, "done")
         failed_root = os.path.join(root_in, "failed")
+        _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".webm", ".m4v", ".ts"}
+
+        def _folder_has_video(folder: str) -> bool:
+            if list_videos_in_folder is not None:
+                try:
+                    return bool(list_videos_in_folder(folder))
+                except Exception:
+                    return False
+            try:
+                for name in os.listdir(folder):
+                    if os.path.splitext(name)[1].lower() in _VIDEO_EXTS:
+                        return True
+            except OSError:
+                return False
+            return False
+
         try:
             os.makedirs(done_root, exist_ok=True)
             os.makedirs(failed_root, exist_ok=True)
@@ -2948,13 +3261,8 @@ class VideoBatchToolV24(_V23):
         for p in sorted(children):
             if p in self._watch_seen_dirs:
                 continue
-            if list_videos_in_folder is not None:
-                try:
-                    video_ok = bool(list_videos_in_folder(p))
-                except Exception:
-                    video_ok = False
-                if not video_ok:
-                    continue
+            if not _folder_has_video(p):
+                continue
 
             self._watch_seen_dirs.add(p)
             try:
@@ -3054,10 +3362,15 @@ class VideoBatchToolV24(_V23):
                 self._refresh_output_preview()
         except Exception:
             pass
-        # 默认页
+        # 默认页（重页懒加载：切过去前再建 UI）
         try:
             if self._sheet is not None:
-                self._sheet.select(habi_memory.tab_index(str(pref.get("default_tab") or "视频批处理")))
+                tab_idx = habi_memory.tab_index(str(pref.get("default_tab") or "视频批处理"))
+                if tab_idx == 1:
+                    self._ensure_naming_embedded()
+                elif tab_idx == 2:
+                    self._ensure_fission_embedded()
+                self._sheet.select(tab_idx)
         except Exception:
             pass
         # 裂变视图/主题
@@ -3084,25 +3397,10 @@ class VideoBatchToolV24(_V23):
             pass
 
     def _on_app_close(self) -> None:
-        try:
-            self.root.update_idletasks()
-            geo = self.root.geometry()
-            # 1400x900+x+y
-            size = geo.split("+", 1)[0]
-            w_s, h_s = size.split("x", 1)
-            maximized = False
-            try:
-                maximized = str(self.root.state()) == "zoomed"
-            except Exception:
-                pass
-            habi_memory.update_window_state(width=int(w_s), height=int(h_s), maximized=maximized)
-            habi_memory.update_prefs(preview_panel_open=bool(self._preview_panel_open))
-        except Exception:
-            pass
-        try:
-            self.root.destroy()
-        except Exception:
-            pass
+        if not self._confirm_exit_if_busy():
+            return
+        self._save_window_state_on_exit()
+        self._finalize_close()
 
     def open_preferences(self) -> None:
         mem = habi_memory.load_memory()
@@ -3440,7 +3738,7 @@ class VideoBatchToolV24(_V23):
         self.subtitle_srt_source = StringVar(value="与视频同目录（同名 .srt）")
         self.subtitle_srt_folder = StringVar(value="")
         self.subtitle_fixed_srt = StringVar(value="")
-        self.subtitle_font_name = StringVar(value="Arial Unicode MS")
+        self.subtitle_font_name = StringVar(value="Segoe UI")
         self.subtitle_font_status = StringVar(value="")
 
         self._lab(frame, "工作模式:", row=0)
@@ -3628,28 +3926,46 @@ class VideoBatchToolV24(_V23):
             anchor="w",
         )
         self._subtitle_font_preview_note.pack(fill=X, padx=10, pady=(8, 2))
-        self._subtitle_font_preview_line1 = tk.Label(
+        from modules.subtitle_engine import subtitle_preview_samples
+
+        self._subtitle_font_preview_samples = subtitle_preview_samples()
+        self._subtitle_font_preview_img_label = tk.Label(
             self._subtitle_font_preview_box,
-            text="Sohbet etmek için hala para mı acıyorsun?",
             bg=preview_bg,
-            fg="#FFFFFF",
-            font=("Microsoft YaHei", 15),
-            anchor="center",
-            justify="center",
-            wraplength=380,
+            anchor="n",
         )
-        self._subtitle_font_preview_line1.pack(fill=X, padx=10, pady=(2, 0))
-        self._subtitle_font_preview_line2 = tk.Label(
-            self._subtitle_font_preview_box,
-            text="还在为了聊天心疼钱吗？",
-            bg=preview_bg,
-            fg="#FFFFFF",
-            font=("Microsoft YaHei", 13),
-            anchor="center",
-            justify="center",
-            wraplength=380,
+        self._subtitle_font_preview_img_label.pack(fill=X, padx=0, pady=(0, 10))
+        self._subtitle_font_preview_photo = None
+        # Tk 文本回退（无 PIL 时使用）
+        self._subtitle_font_preview_lines: list[tk.Label] = []
+        self._subtitle_font_preview_fallback = tk.Frame(self._subtitle_font_preview_box, bg=preview_bg)
+        for i, (tag, sample_text, anchor) in enumerate(self._subtitle_font_preview_samples):
+            row = tk.Frame(self._subtitle_font_preview_fallback, bg=preview_bg)
+            row.pack(fill=X, padx=10, pady=(0, 6))
+            tk.Label(
+                row, text=tag, bg=preview_bg, fg="#888888", font=("Microsoft YaHei", 8), anchor="w",
+            ).pack(fill=X)
+            size = 15 if i == 0 else 13
+            safe_anchor = _tk_label_anchor(anchor)
+            lbl = tk.Label(
+                row,
+                text=sample_text,
+                bg=preview_bg,
+                fg="#FFFFFF",
+                font=("Segoe UI", size),
+                anchor=safe_anchor,
+                justify="right" if safe_anchor == "e" else "left",
+                wraplength=380,
+            )
+            lbl.pack(fill=X)
+            self._subtitle_font_preview_lines.append(lbl)
+        self._subtitle_font_preview_fallback.pack_forget()
+        self._subtitle_font_preview_line1 = (
+            self._subtitle_font_preview_lines[0] if self._subtitle_font_preview_lines else None
         )
-        self._subtitle_font_preview_line2.pack(fill=X, padx=10, pady=(0, 10))
+        self._subtitle_font_preview_line2 = (
+            self._subtitle_font_preview_lines[1] if len(self._subtitle_font_preview_lines) > 1 else None
+        )
 
         self._subtitle_hint = ttk.Label(
             frame,
@@ -3660,6 +3976,8 @@ class VideoBatchToolV24(_V23):
         )
         self._subtitle_hint.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 0))
 
+        # 默认 AI 模式；先隐藏烧录区，避免首帧两 Frame 叠在同一 grid 单元
+        self._subtitle_burn_frame.grid_remove()
         self.root.after_idle(self._on_subtitle_work_mode_changed)
 
     def _on_subtitle_work_mode_changed(self) -> None:
@@ -3731,18 +4049,21 @@ class VideoBatchToolV24(_V23):
             "subtitle_srt_source": "与视频同目录（同名 .srt）",
             "subtitle_srt_folder": "",
             "subtitle_fixed_srt": "",
-            "subtitle_font_name": "Arial Unicode MS",
+            "subtitle_font_name": "Segoe UI",
         }
 
     def _apply_subtitle_config(self, cfg: dict) -> None:
+        if not isinstance(cfg, dict):
+            return
         defaults = self._subtitle_field_defaults()
-        for key, default in defaults.items():
-            attr = key
-            var = getattr(self, attr, None)
+        for key in defaults:
+            if key not in cfg:
+                continue
+            var = getattr(self, key, None)
             if var is None:
                 continue
             try:
-                val = cfg.get(key, default) if isinstance(cfg, dict) else default
+                val = cfg[key]
                 var.set("" if val is None else str(val))
             except Exception:
                 pass
@@ -3764,7 +4085,7 @@ class VideoBatchToolV24(_V23):
     def _apply_subtitle_font_suggestion(self) -> None:
         from modules.subtitle_engine import suggest_subtitle_font
 
-        self.subtitle_font_name.set(suggest_subtitle_font())
+        self.subtitle_font_name.set(suggest_subtitle_font(root=self.root))
         self._refresh_subtitle_font_hint()
 
     def _refresh_subtitle_font_list(self) -> None:
@@ -3792,16 +4113,15 @@ class VideoBatchToolV24(_V23):
         self._refresh_subtitle_font_preview(installed=ok)
 
     def _refresh_subtitle_font_preview(self, *, installed: bool = True) -> None:
-        """黑底白字预览当前烧录字体（双语两行，接近成片效果）。"""
-        line1 = getattr(self, "_subtitle_font_preview_line1", None)
-        line2 = getattr(self, "_subtitle_font_preview_line2", None)
+        """黑底白字预览当前烧录字体（中/土/阿三语样例，接近成片效果）。"""
         note = getattr(self, "_subtitle_font_preview_note", None)
-        if line1 is None or line2 is None:
-            return
+        img_label = getattr(self, "_subtitle_font_preview_img_label", None)
+        fallback = getattr(self, "_subtitle_font_preview_fallback", None)
+        lines = getattr(self, "_subtitle_font_preview_lines", None) or []
 
+        requested = (self.subtitle_font_name.get() or "").strip() or "Segoe UI"
         import tkinter.font as tkfont
 
-        requested = (self.subtitle_font_name.get() or "").strip() or "Arial"
         families = list(tkfont.families(self.root))
         family = requested
         exact = family in families
@@ -3812,19 +4132,58 @@ class VideoBatchToolV24(_V23):
                 family = hit
                 exact = True
 
-        def _make_font(size: int) -> tkfont.Font:
-            try:
-                return tkfont.Font(family=family, size=size)
-            except tk.TclError:
-                return tkfont.Font(size=size)
+        rendered = False
+        try:
+            from PIL import ImageTk
+            from modules.subtitle_engine import render_subtitle_font_preview
 
-        line1.config(font=_make_font(15))
-        line2.config(font=_make_font(13))
+            img = render_subtitle_font_preview(family)
+            if img is not None and img_label is not None:
+                self._subtitle_font_preview_photo = ImageTk.PhotoImage(img)
+                img_label.config(image=self._subtitle_font_preview_photo)
+                img_label.pack(fill=X, padx=0, pady=(0, 10))
+                if fallback is not None:
+                    fallback.pack_forget()
+                rendered = True
+        except Exception:
+            rendered = False
+
+        if not rendered:
+            if img_label is not None:
+                img_label.config(image="")
+                img_label.pack_forget()
+            if fallback is not None:
+                fallback.pack(fill=X, padx=0, pady=(0, 10))
+
+            import tkinter.font as tkfont
+
+            def _make_font(size: int) -> tkfont.Font:
+                try:
+                    return tkfont.Font(family=family, size=size)
+                except tk.TclError:
+                    return tkfont.Font(size=size)
+
+            samples = getattr(self, "_subtitle_font_preview_samples", ())
+            sizes = (15, 13, 13)
+            for i, lbl in enumerate(lines):
+                size = sizes[i] if i < len(sizes) else 13
+                lbl.config(font=_make_font(size))
+                if i < len(samples):
+                    _tag, text, anchor = samples[i]
+                    safe_anchor = _tk_label_anchor(anchor)
+                    lbl.config(
+                        text=text,
+                        anchor=safe_anchor,
+                        justify="right" if safe_anchor == "e" else "left",
+                    )
 
         if note is not None:
             if exact or installed:
                 note.config(
-                    text=f"当前字体：{family} · 上行原文 / 下行译文（预览仅供参考，成片由 FFmpeg 渲染）",
+                    text=(
+                        f"当前字体：{family} · 预览：中文 / 土耳其语 / 阿拉伯语"
+                        " · 阿语行若出现方框□说明该字体不适合阿语烧录"
+                    ),
                     fg="#888888",
                 )
             else:
@@ -3840,14 +4199,23 @@ class VideoBatchToolV24(_V23):
         self._build_left_panel(self._layout.left)
         self._build_right_panel(self._layout.right)
         self._build_right_actions(self._layout.right_actions)
-        self._embed_naming_tool()
-        self._embed_fission_panel()
+        # 规范命名 / 裂变页首次切 Tab 时再加载，加快启动
         self._sync_feature_panels()
         self._refresh_footer_status()
-        self.root.after_idle(self._refresh_asset_tree)
 
 
 def main():
+    import os
+    import sys
+
+    from modules.platform_utils import app_dir, install_silent_subprocess, is_mac
+
+    install_silent_subprocess()
+    if is_mac() and getattr(sys, "frozen", False):
+        try:
+            os.chdir(app_dir())
+        except OSError:
+            pass
     from modules import habi_memory
 
     app_skin = str(habi_memory.prefs().get("default_theme") or "简约工作台").strip()
@@ -3862,10 +4230,36 @@ def main():
         pass
 
     use_none = is_none_skin(app_skin)
+    skin_label = (
+        "无主题（经典皮肤）" if use_none
+        else (app_skin if app_skin in APP_SKIN_LABELS else "简约工作台")
+    )
 
     root = tk.Tk()
     root.title(APP_TITLE)
-    root._ui_theme = UI_THEME_NONE if use_none else app_skin  # noqa: SLF001
+    root.withdraw()
+    root._ui_theme = UI_THEME_NONE if use_none else skin_label  # noqa: SLF001
+
+    splash = tk.Toplevel(root)
+    try:
+        splash.overrideredirect(True)
+        splash.attributes("-topmost", True)
+        splash.configure(bg="#f5f5f5")
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        sw, sh = int(sw or 800), int(sh or 600)
+        box_w, box_h = 300, 72
+        splash.geometry(f"{box_w}x{box_h}+{(sw - box_w) // 2}+{(sh - box_h) // 2}")
+        tk.Label(
+            splash, text=APP_TITLE, font=("Microsoft YaHei", 12, "bold"),
+            bg="#f5f5f5", fg="#1a1a1a",
+        ).pack(pady=(14, 4))
+        tk.Label(
+            splash, text="正在加载…", font=("Microsoft YaHei", 9),
+            bg="#f5f5f5", fg="#666666",
+        ).pack()
+        root.update_idletasks()
+    except TclError:
+        splash = None
 
     style = ttk.Style()
     try:
@@ -3873,31 +4267,58 @@ def main():
     except TclError:
         pass
 
+    # 构建 UI 前先写入目标色板，避免先简约后换肤的闪烁
+    apply_theme_palette(theme_for_label(skin_label))
     apply_workbench_root(root)
     apply_safe_ttk_base(root)
 
-    try:
-        root.geometry("1450x850")
-        root.minsize(1280, 760)
-    except TclError:
-        pass
+    def _pump_splash() -> None:
+        try:
+            root.update_idletasks()
+            root.update()
+        except TclError:
+            pass
 
+    def _reveal_main_window() -> None:
+        if splash is not None:
+            try:
+                splash.destroy()
+            except TclError:
+                pass
+        try:
+            root.deiconify()
+            root.state("zoomed")
+        except TclError:
+            try:
+                root.minsize(1280, 760)
+                root.geometry("1450x850")
+                root.deiconify()
+            except TclError:
+                pass
+        try:
+            app.log("就绪 · 方案模板在左侧 · 设置在中间栏")
+        except Exception:
+            pass
+
+    root._on_startup_ready = _reveal_main_window  # noqa: SLF001
+
+    _pump_splash()
     app = VideoBatchToolV24(root)
     try:
-        if use_none:
-            app._apply_app_skin("无主题（经典皮肤）")
-        elif app_skin in APP_SKIN_LABELS:
-            app._apply_app_skin(app_skin)
-        else:
-            app._apply_app_skin("简约工作台")
+        # 须在第一次 pump 前完成着色，否则 after_idle 的 startup_finalize 会先露出简约色
+        app._apply_app_skin(skin_label, sync_recolor=True)
     except Exception as exc:
         print(f"主题加载失败: {exc}")
 
+    _pump_splash()
+    if getattr(app, "_startup_finalize_done", False):
+        _reveal_main_window()
+
     try:
-        root.state("zoomed")
-    except TclError:
+        root.after_idle(app._pump_ui_queue)
+    except Exception:
         pass
-    app.log("就绪 · 方案模板在左侧 · 设置在右下角")
+
     root.mainloop()
 
 
@@ -3909,7 +4330,7 @@ if __name__ == "__main__":
         traceback.print_exc()
         try:
             from tkinter import messagebox
-            messagebox.showerror("启动失败", f"{exc}\n\n请用 启动V24工作台.bat 或 Python 3.13 启动")
+            messagebox.showerror("启动失败", f"{exc}\n\n请重新启动程序，或使用 Python 3.13 运行 video_batch_tool_v24.py")
         except Exception:
             pass
         raise

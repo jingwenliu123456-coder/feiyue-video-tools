@@ -50,10 +50,11 @@ class VideoBatchToolV23(_V22):
         self._fission_running = False
         self.fission_plan_name_var = StringVar(value="默认裂变")
         super().__init__(root)
-        try:
-            self.root.title(APP_TITLE)
-        except Exception:
-            pass
+        if not getattr(root, "_habi_workbench_v24", False):
+            try:
+                self.root.title(APP_TITLE)
+            except Exception:
+                pass
 
     def _on_templates_catalog_changed(self) -> None:
         panel = getattr(self, "_fission_panel", None)

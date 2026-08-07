@@ -89,7 +89,13 @@ RATIO_SIZES = {
 
 
 def _subprocess_flags():
-    return subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+    from modules.platform_utils import subprocess_flags
+    return subprocess_flags()
+
+
+def _hidden_kw() -> dict:
+    from modules.platform_utils import hidden_subprocess_kwargs
+    return hidden_subprocess_kwargs()
 
 
 def run_ffmpeg(cmd_list, raise_on_fail=False, poll_cb=None, progress_cb=None):
@@ -115,7 +121,8 @@ def ffprobe_value(path, args):
         r = subprocess.run(
             [FFPROBE_PATH, '-v', 'error'] + args,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors='ignore', creationflags=_subprocess_flags(),
+            text=True, errors='ignore',
+            **_hidden_kw(),
         )
         return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
@@ -125,9 +132,12 @@ def ffprobe_value(path, args):
 class VideoBatchTool:
     def __init__(self, root):
         self.root = root
-        self.root.title("视频批处理工具 V20")
-        self.root.geometry("1200x820")
-        self.root.minsize(900, 600)
+        if not getattr(root, "_habi_workbench_v24", False):
+            self.root.title("视频批处理工具 V20")
+            self.root.geometry("1200x820")
+            self.root.minsize(900, 600)
+        else:
+            self.root.minsize(1280, 760)
         self.set_window_icon()
 
         self.clipboard_filename = ""
@@ -663,7 +673,7 @@ class VideoBatchTool:
             if folder:
                 cmd.extend(["--args", folder])
             try:
-                subprocess.Popen(cmd, cwd=str(base))
+                subprocess.Popen(cmd, cwd=str(base), **_hidden_kw())
                 self.log("已启动规范命名工具" + (f"，文件夹: {folder}" if folder else ""))
             except Exception as e:
                 self._log_exception("open_naming_tool", e)
@@ -674,7 +684,7 @@ class VideoBatchTool:
         if folder:
             cmd.append(folder)
         try:
-            subprocess.Popen(cmd, cwd=str(base))
+            subprocess.Popen(cmd, cwd=str(base), **_hidden_kw())
             self.log("已启动规范命名工具" + (f"，文件夹: {folder}" if folder else ""))
         except Exception as e:
             self._log_exception("open_naming_tool", e)
