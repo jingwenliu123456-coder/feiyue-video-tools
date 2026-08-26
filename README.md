@@ -1,71 +1,39 @@
-# 飞跃视频工具（Feiyue Video Tool）
+# 飞跃视频工具
 
-面向投放与素材包装的 **本地视频批处理工作台**：批处理、规范命名、批量裂变。无需上传素材到云端。
+本地视频批处理工具：**批处理 · 规范命名 · 批量裂变**。本仓库仅提供 **安装包下载**，**不公开源代码**。
 
-## 功能
+## 下载安装包
 
-| 模块 | 说明 |
-|------|------|
-| **视频批处理** | 比例、水印、落版、字幕等按方案模板批量出片 |
-| **规范命名** | 按品牌/语言/标签/日期等字段统一改名；日期支持 4 / 6 / 8 位与自定义；对照改名左右双栏 |
-| **批量裂变** | 单源或多源，一素材挂多方案，自动建输出子文件夹 |
+👉 **[Releases 发布页](https://github.com/jingwenliu123456-coder/feiyue-video-tools/releases)**（点最新版本下载 zip）
 
-## 下载安装包（推荐）
+| 平台 | 文件 | 说明 |
+|------|------|------|
+| macOS（M 系列） | `HabiVideoTool_macOS.zip` | Apple Silicon（M1/M2/M3/M4 等） |
 
-在 [Releases](https://github.com/jingwenliu123456-coder/feiyue-video-tools/releases) 下载，不要从仓库里找 zip（安装包不进 git）。
+### macOS 安装
 
-### macOS（Apple Silicon / M 系列）
-
-1. 下载 `HabiVideoTool_macOS.zip` 并解压  
-2. **右键** `飞跃视频工具.app` → **打开** → 再点 **打开**（首次勿直接双击）  
-3. 若被拦截：系统设置 → 隐私与安全性 → 仍要打开  
-
-当前 Mac 包为 **arm64**，适用于 M 系列 Mac / Mac Studio / 近年 iMac。Intel Mac 需另行构建 universal 或 x64 包。
+1. 解压 zip  
+2. **右键** `飞跃视频工具.app` → **打开** → 再点 **打开**（首次不要双击）  
+3. 若被拦截：系统设置 → 隐私与安全性 → **仍要打开**  
 
 ### Windows
 
-Windows 安装包见 Releases 中的 Windows 附件（若有）。也可在 Windows 上自行打包：
+Windows 安装包将随新版本发布在 Releases。当前请留意 Releases 页面更新。
 
-```bat
-build_windows.bat
-```
+## 功能简介
 
-## 从源码构建（macOS）
+- **视频批处理**：比例、水印、落版、字幕等按方案批量出片  
+- **规范命名**：统一文件名；日期支持 4 / 6 / 8 位与自定义  
+- **批量裂变**：一素材多方案，自动建输出子文件夹  
 
-```bash
-chmod +x build_mac.sh prepare_mac_icons.sh
-./build_mac.sh
-```
+全程本地处理，素材不上传云端。
 
-产物：`dist/HabiVideoTool_macOS/飞跃视频工具.app`
+## 使用许可
 
-需本机 Python 3.10+、`.venv`、FFmpeg（脚本会检查依赖）。详见 `README_V24_Mac打包.md`。
-
-## 字幕（可选）
-
-- **外部 SRT 烧录**：无需额外环境（剪映/PR 导出 SRT 即可）  
-- **AI 识别（Whisper）**：运行 `setup_subtitle_env_mac.sh` 一次，需联网下载模型  
-
-## 方案模板说明
-
-`templates/` 内 JSON 可能含开发机上的绝对路径，**仅作参数示例**。在新电脑加载后请重新选择本机水印/片尾素材路径，或另存为自己的方案。
-
-## 开源许可
-
-本仓库源码以 **[MIT License](LICENSE)** 发布。
-
-- 可自由使用、修改、分发（保留版权声明）  
-- 内置 **FFmpeg** 等第三方组件另有各自许可证，分发安装包时请保留其说明  
-
-**团队定制**（字段规则、流程微调、私有化部署等）不在 MIT 自动覆盖范围内，欢迎通过 GitHub Issues 联系洽谈。
-
-## 仓库结构（简要）
-
-- `video_batch_tool_v24.py` — 主程序入口（V24 工作台）  
-- `naming_tool.py` — 规范命名（内嵌于主程序）  
-- `ui/`、`modules/`、`core/` — 界面与处理逻辑  
-- `build_mac.sh`、`video_batch_tool_v24_mac.spec` — macOS 打包  
+- 安装包供 **个人与团队内部免费使用**  
+- **不得**将安装包转售或冒充官方二次分发  
+- **源代码不公开**；流程微调、字段规则、私有化部署等 **定制合作** 请通过 Issues 联系  
 
 ## 反馈
 
-问题与建议：[GitHub Issues](https://github.com/jingwenliu123456-coder/feiyue-video-tools/issues)
+[GitHub Issues](https://github.com/jingwenliu123456-coder/feiyue-video-tools/issues)
