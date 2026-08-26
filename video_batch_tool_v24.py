@@ -166,7 +166,7 @@ class VideoBatchToolV24(_V23):
             self.root.title(APP_TITLE)
             if hasattr(self, "main_title_label"):
                 self.main_title_label.config(
-                    text=f"🎬  {APP_TITLE}" if use_ui_emoji() else APP_TITLE,
+                    text=f"{APP_TITLE}" if use_ui_emoji() else APP_TITLE,
                 )
         except Exception:
             pass
@@ -744,7 +744,7 @@ class VideoBatchToolV24(_V23):
         left_hdr.pack(side=LEFT, padx=20, pady=14)
         self.main_title_label = tk.Label(
             left_hdr,
-            text=f"🎬  {APP_TITLE}" if use_ui_emoji() else APP_TITLE,
+            text=f"{APP_TITLE}" if use_ui_emoji() else APP_TITLE,
             bg=WB_CARD,
             fg=WB_TEXT,
             font=("Microsoft YaHei", 14, "bold"),
@@ -799,16 +799,16 @@ class VideoBatchToolV24(_V23):
 
     def check_ffmpeg(self) -> None:
         """后台检测 FFmpeg，避免阻塞 splash → 主界面。"""
-        from modules.platform_utils import SYSTEM, check_ffmpeg_available
+        from modules.platform_utils import check_ffmpeg_available
 
         def _worker() -> None:
             ok, msg = check_ffmpeg_available(v20.FFMPEG_PATH, v20.FFPROBE_PATH)
 
             def _log() -> None:
                 if ok:
-                    self.log(f"FFmpeg 已就绪（{SYSTEM}）")
+                    self.log("视频处理引擎已就绪")
                 else:
-                    self.log(f"FFmpeg 未就绪：{msg}")
+                    self.log("视频处理引擎未就绪，请确认本机已安装处理组件")
 
             self._enqueue_ui(_log)
 
@@ -912,7 +912,7 @@ class VideoBatchToolV24(_V23):
         ) or suggest_subtitle_font()
         ok_font, font_msg = validate_subtitle_font(font_name, self.root)
         if not ok_font:
-            self.log(f"  ⚠ 烧录字体: {font_msg}（仍尝试使用 {font_name}）")
+            self.log(f"  注意：烧录字体: {font_msg}（仍尝试使用 {font_name}）")
 
         engine = SubtitleEngine(
             ffmpeg_path=v20.FFMPEG_PATH,
@@ -1010,7 +1010,7 @@ class VideoBatchToolV24(_V23):
 
         output_mode = (mode_ui or "仅翻译").strip()
         if output_mode in ("仅翻译", "双语并存(单文件)", "双文件输出") and not target_google:
-            self.log("  ⚠ 当前输出模式需要目标语言，已改为「仅原语言」")
+            self.log("  注意：当前输出模式需要目标语言，已改为「仅原语言」")
             output_mode = "仅原语言"
 
         model_size = (
@@ -1062,7 +1062,7 @@ class VideoBatchToolV24(_V23):
                 f"（源≈{src_google or 'auto'} → {target_google}）"
             )
             if changed == 0 and total > 0 and output_mode in ("双语并存(单文件)", "仅翻译"):
-                self.log("  ⚠ 翻译结果与原文相同，请确认目标语言、网络，或源语言是否识别正确")
+                self.log("  注意：翻译结果与原文相同，请确认目标语言、网络，或源语言是否识别正确")
 
         if output_mode == "仅原语言":
             engine.write_srt(src_segments, tmp_srt)
@@ -1119,16 +1119,16 @@ class VideoBatchToolV24(_V23):
             self.log(f"  SRT 输出: {out_srt_path}")
         if backend == "google":
             self.log(
-                "  ⚠ Google 备用识别：长视频时间轴可能不准。"
+                "  注意：Google 备用识别：长视频时间轴可能不准。"
                 "请运行 scripts\\setup_subtitle_env.bat 后重启工具"
             )
             if duration_sec is not None and duration_sec > 90 and seg_n <= 1:
                 self.log(
-                    f"  ⚠ 视频约 {int(duration_sec)}s 但仅 {seg_n} 条字幕，"
+                    f"  注意：视频约 {int(duration_sec)}s 但仅 {seg_n} 条字幕，"
                     "此 SRT 不适合直接使用，请修复 Whisper 后重跑"
                 )
         elif seg_n == 0:
-            self.log("  ⚠ 未识别到有效字幕内容（请确认视频有人声；纯 BGM 素材无法识别）")
+            self.log("  注意：未识别到有效字幕内容（请确认视频有人声；纯 BGM 素材无法识别）")
             raise RuntimeError(
                 "字幕识别结果为空：请检查视频是否有人声，或 Whisper 是否可用（见启动日志）"
             )
@@ -2519,7 +2519,7 @@ class VideoBatchToolV24(_V23):
         self._left_body_host = body_host
 
         # 1) 输入源（在方案模板上面）
-        card, _hdr, body = self._module_card(body_host, "输入源", "📁", "input_src")
+        card, _hdr, body = self._module_card(body_host, "输入源", "", "input_src")
         card.pack(fill=X, pady=(0, 12))
         make_button(body, "选择输入文件夹", self._pick_input_and_refresh, kind="outline").pack(
             anchor="w", pady=(0, 6),
@@ -2537,17 +2537,17 @@ class VideoBatchToolV24(_V23):
         drop_zone.pack(fill=X, pady=(0, 4))
         drop_zone.bind("<Button-1>", lambda _e: self._pick_input_and_refresh())
         try:
-            from modules.folder_drop import drop_backend_name, hook_folder_drop
+            from modules.folder_drop import hook_folder_drop
 
             def _register_drop() -> None:
                 if hook_folder_drop(drop_zone, self._on_input_folder_dropped):
-                    self.log(f"文件夹拖放已启用 ({drop_backend_name()})")
+                    self.log("已支持拖入文件夹")
                 else:
-                    drop_zone.config(text="拖放不可用，请用按钮选择（需 pip install windnd）")
+                    drop_zone.config(text="拖放暂不可用，请用按钮选择文件夹")
 
             self.root.after_idle(_register_drop)
         except Exception:
-            drop_zone.config(text="拖放不可用，请用按钮选择文件夹")
+            drop_zone.config(text="拖放暂不可用，请用按钮选择文件夹")
         ttk.Label(body, textvariable=self._input_stats_var, foreground=WB_MUTED).pack(anchor="w")
         tree_wrap = ttk.Frame(body)
         # 勿 expand：否则会占满左栏高度，把下方「功能清单」挤出可视区
@@ -2566,7 +2566,7 @@ class VideoBatchToolV24(_V23):
         self._input_tree = tree
 
         # 2) 方案模板
-        card, _hdr, body = self._module_card(body_host, "方案模板", "🗂️", "tpl_hint")
+        card, _hdr, body = self._module_card(body_host, "方案模板", "", "tpl_hint")
         card.pack(fill=X, pady=(0, 12))
         ttk.Label(body, text="选好输入后，直接套一套方案", foreground=WB_MUTED, font=("", 8)).pack(
             anchor="w", pady=(0, 4),
@@ -2582,7 +2582,7 @@ class VideoBatchToolV24(_V23):
         # refresh_templates 已在 _init_chrome 调用，此处不重复扫目录
 
         # 3) 功能清单（提前到常用素材上方，避免被挤出可视区）
-        card, _hdr, body = self._module_card(body_host, "功能清单", "✅", "features")
+        card, _hdr, body = self._module_card(body_host, "功能清单", "", "features")
         card.pack(fill=X, pady=(0, 12))
         ttk.Label(body, text="勾选后设置出现在中间；新勾选置顶", foreground=WB_MUTED, font=("Microsoft YaHei", 9)).pack(
             anchor="w", pady=(0, 8),
@@ -2593,7 +2593,7 @@ class VideoBatchToolV24(_V23):
         self._populate_feature_checklist(feat_host)
 
         # 4) 常用素材（简化）
-        card, _hdr, body = self._module_card(body_host, "常用素材", "📦", "naming")
+        card, _hdr, body = self._module_card(body_host, "常用素材", "", "naming")
         card.pack(fill=X, pady=(0, 12))
         make_button(body, "＋ 导入素材", self._asset_import_any, kind="info").pack(fill=X, pady=(0, 6))
         mode_row = ttk.Frame(body)
@@ -2612,7 +2612,7 @@ class VideoBatchToolV24(_V23):
         self._asset_list_host = ttk.Frame(body)
         self._asset_list_host.pack(fill=X)
 
-        preview_card, _hdr, body = self._module_card(body_host, "预览", "👁", "preview")
+        preview_card, _hdr, body = self._module_card(body_host, "预览", "", "preview")
         preview_card.pack(fill=X)
         self.preview_mode_var = getattr(self, "preview_mode_var", StringVar(value="智能"))
         bar = ttk.Frame(body)
@@ -2697,7 +2697,7 @@ class VideoBatchToolV24(_V23):
         self._queue_count_var = StringVar(value="0 个任务")
         self._watch_status_var = StringVar(value="未开启")
 
-        card, _hdr, body = self._module_card(parent, "输出路径", "📂", "output")
+        card, _hdr, body = self._module_card(parent, "输出路径", "", "output")
         card.pack(fill=X, pady=(0, 10))
         ttk.Label(body, text="输出文件夹 / 裂变输出根").pack(anchor="w")
         ttk.Entry(body, textvariable=self.global_output_folder).pack(fill=X, pady=(4, 6))
@@ -2710,7 +2710,7 @@ class VideoBatchToolV24(_V23):
             anchor="w", pady=(6, 0),
         )
 
-        card, _hdr, body = self._module_card(parent, "规范命名", "🏷️", "naming")
+        card, _hdr, body = self._module_card(parent, "规范命名", "", "naming")
         card.pack(fill=X, pady=(0, 10))
         make_button(body, "切换到命名页", self.open_naming_tool, kind="info").pack(fill=X)
         make_button(body, "保存配置", self.save_config, kind="outline").pack(fill=X, pady=(6, 0))
@@ -2718,7 +2718,7 @@ class VideoBatchToolV24(_V23):
         adv_shell, _adv_hdr, adv_body, _adv_toggle = collapsible_section(
             parent,
             "高级 / 实验功能",
-            icon="🧪",
+            icon="",
             subtitle="日常可忽略",
             expanded=False,
         )
@@ -2733,7 +2733,7 @@ class VideoBatchToolV24(_V23):
         ).pack(anchor="w", padx=4, pady=(0, 8))
 
         q_shell, q_hdr, q_body, _q_toggle = collapsible_section(
-            adv_body, "生产队列", icon="🧾", expanded=False,
+            adv_body, "生产队列", icon="", expanded=False,
         )
         q_shell.pack(fill=X, pady=(0, 8))
         self._queue_badge = tk.Label(
@@ -2799,7 +2799,7 @@ class VideoBatchToolV24(_V23):
         q_vsb.pack(side=RIGHT, fill=Y)
 
         w_shell, w_hdr, w_body, _w_toggle = collapsible_section(
-            adv_body, "监视文件夹", icon="👁", expanded=False,
+            adv_body, "监视文件夹", icon="", expanded=False,
         )
         w_shell.pack(fill=X, pady=(0, 4))
         self._watch_indicator = tk.Label(
@@ -2851,7 +2851,7 @@ class VideoBatchToolV24(_V23):
             w3, text="新子文件夹 → 自动加入队列", foreground=WB_MUTED, font=("", 8),
         ).pack(side=LEFT, padx=(8, 0))
 
-        card, _hdr, body = self._module_card(parent, "进度与日志", "📊", "progress")
+        card, _hdr, body = self._module_card(parent, "进度与日志", "", "progress")
         card.pack(fill=BOTH, expand=True, pady=(0, 10))
 
         prog_row = tk.Frame(body, bg=WB_CARD)
@@ -3723,7 +3723,7 @@ class VideoBatchToolV24(_V23):
         card, _hdr, frame = self._module_card(
             self.main_frame,
             "字幕（识别 / 外部烧录）",
-            "💬",
+            "",
             "subtitle",
             enable_var=self.subtitle_enable,
         )
@@ -4109,7 +4109,7 @@ class VideoBatchToolV24(_V23):
         if ok:
             n = len(list_subtitle_font_choices(self.root))
             msg = f"{msg} · 下拉共 {n} 个字体"
-        self.subtitle_font_status.set(msg if ok else f"⚠ {msg}")
+        self.subtitle_font_status.set(msg if ok else f"注意：{msg}")
         self._refresh_subtitle_font_preview(installed=ok)
 
     def _refresh_subtitle_font_preview(self, *, installed: bool = True) -> None:
@@ -4188,7 +4188,7 @@ class VideoBatchToolV24(_V23):
                 )
             else:
                 note.config(
-                    text=f"⚠ 未找到「{requested}」，预览为系统默认字体；烧录可能缺字",
+                    text=f"注意：未找到「{requested}」，预览为系统默认字体；烧录可能缺字",
                     fg="#E6A23C",
                 )
 
@@ -4239,6 +4239,12 @@ def main():
     root.title(APP_TITLE)
     root.withdraw()
     root._ui_theme = UI_THEME_NONE if use_none else skin_label  # noqa: SLF001
+    try:
+        from modules.ui_skin import enable_tk_dnd
+
+        enable_tk_dnd(root)
+    except Exception:
+        pass
 
     splash = tk.Toplevel(root)
     try:
@@ -4296,7 +4302,7 @@ def main():
             except TclError:
                 pass
         try:
-            app.log("就绪 · 方案模板在左侧 · 设置在中间栏")
+            app.log("欢迎使用飞跃视频工具")
         except Exception:
             pass
 

@@ -50,6 +50,18 @@ from modules.output_naming import unique_path
 def _templates_dir() -> Path:
     d = config_path("templates")
     d.mkdir(parents=True, exist_ok=True)
+    # Mac 打包版：用户目录为空时，从 App 内置 templates 种子一份默认方案
+    try:
+        if not any(d.glob("*.json")):
+            from modules.platform_utils import resource_path
+            import shutil
+
+            src = resource_path("templates")
+            if src.is_dir():
+                for p in src.glob("*.json"):
+                    shutil.copy2(p, d / p.name)
+    except Exception:
+        pass
     return d
 
 
@@ -361,9 +373,9 @@ class VideoBatchTool:
         self.template_combo = ttk.Combobox(tpl, textvariable=self.template_var, width=22, state="readonly")
         self.template_combo.pack(side=LEFT)
         self.template_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_selected_template())
-        make_button(tpl, "🔄", self.refresh_templates, kind="tool", width=3).pack(side=LEFT, padx=2)
-        make_button(tpl, "💾 保存", self.save_as_template, kind="outline", width=8).pack(side=LEFT, padx=2)
-        make_button(tpl, "🗑", self.delete_selected_template, kind="danger", width=3).pack(side=LEFT, padx=2)
+        make_button(tpl, "刷新", self.refresh_templates, kind="tool", width=3).pack(side=LEFT, padx=2)
+        make_button(tpl, "保存", self.save_as_template, kind="outline", width=8).pack(side=LEFT, padx=2)
+        make_button(tpl, "删", self.delete_selected_template, kind="danger", width=3).pack(side=LEFT, padx=2)
 
         self.main_title_label = self._toolbar.winfo_children()[0]
 
@@ -396,9 +408,16 @@ class VideoBatchTool:
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(self.canvas_window, width=e.width))
 
         def _on_mousewheel(event):
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            from modules.scroll_compat import apply_yview_scroll
 
-        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+            apply_yview_scroll(
+                self.canvas, event,
+                touchpad=bool(getattr(event, "_wb_touchpad", False)),
+            )
+
+        from modules.scroll_compat import bind_scroll_all
+
+        bind_scroll_all(self.root, _on_mousewheel)
 
     def _create_sash_handle(self):
         self._sash_drag_y = 0
@@ -559,11 +578,11 @@ class VideoBatchTool:
         self.progress["value"] = current
         if current >= total:
             if failed:
-                self.status_var.set(f"⚠️ 全部结束 | 成功 {total - failed}/{total} | 失败 {failed} 条")
+                self.status_var.set(f"注意：全部结束 | 成功 {total - failed}/{total} | 失败 {failed} 条")
             else:
                 elapsed = time.time() - start_time if start_time else 0
                 eta = self._format_eta(elapsed) if elapsed else ""
-                self.status_var.set(f"✅ 全部完成 | {total}/{total}" + (f" | 用时 {eta}" if eta else ""))
+                self.status_var.set(f"全部完成 | {total}/{total}" + (f" | 用时 {eta}" if eta else ""))
             return
         if start_time and current > 0:
             elapsed = time.time() - start_time
@@ -579,9 +598,9 @@ class VideoBatchTool:
     def check_ffmpeg(self):
         ok, msg = check_ffmpeg_available(FFMPEG_PATH, FFPROBE_PATH)
         if ok:
-            self.log(f"FFmpeg 已就绪（{SYSTEM}）")
+            self.log("视频处理引擎已就绪")
         else:
-            self.log(f"FFmpeg 未就绪：{msg}")
+            self.log("视频处理引擎未就绪，请确认本机已安装处理组件")
 
     # ==================== UI ====================
 
@@ -619,7 +638,7 @@ class VideoBatchTool:
         from modules.ui_skin import create_card, FONTS, make_button
 
         card, _hdr, content = self._module_card(
-            self.main_frame, "全局输入 / 输出", "📁", "global",
+            self.main_frame, "全局输入 / 输出", "", "global",
         )
         self._grid_card(card, row, 0, colspan=3)
         content.columnconfigure(1, weight=1)
@@ -650,7 +669,7 @@ class VideoBatchTool:
         ttk.Entry(out_nf, textvariable=self.output_suffix, width=24).pack(side=LEFT, padx=2)
         ttk.Label(
             out_nf,
-            text="💡 如 sample.mp4 + _habi → sample_habi.mp4",
+            text="如 sample.mp4 + _habi → sample_habi.mp4",
             font=FONTS["caption"], foreground="gray",
         ).pack(side=LEFT, padx=8)
         return row + 1
@@ -694,14 +713,14 @@ class VideoBatchTool:
         from modules.ui_skin import create_card, make_button
 
         card, _hdr, content = self._module_card(
-            self.main_frame, "批处理操作", "🚀", "global",
+            self.main_frame, "批处理操作", "", "global",
         )
         self._grid_card(card, row, 0, colspan=3)
 
-        make_button(content, "🚀 开始批量处理", self.start_batch, kind="success").pack(
+        make_button(content, "开始批量处理", self.start_batch, kind="success").pack(
             side=LEFT, padx=4, pady=4)
         self.preview_mode_var = StringVar(value="智能")
-        make_button(content, "🎬 试跑预览", self.preview_first_video, kind="info").pack(side=LEFT, padx=4, pady=4)
+        make_button(content, "试跑预览", self.preview_first_video, kind="info").pack(side=LEFT, padx=4, pady=4)
         ttk.Combobox(
             content,
             textvariable=self.preview_mode_var,
@@ -710,7 +729,7 @@ class VideoBatchTool:
             state="readonly",
         ).pack(side=LEFT, padx=(0, 6), pady=4)
         make_button(content, "打开输出", self.open_global_output, kind="outline").pack(side=LEFT, padx=4, pady=4)
-        make_button(content, "🎵 音频工具箱", self.open_audio_toolbox, kind="outline").pack(side=LEFT, padx=4, pady=4)
+        make_button(content, "音频工具箱", self.open_audio_toolbox, kind="outline").pack(side=LEFT, padx=4, pady=4)
         make_button(content, "保存配置", self.save_config, kind="outline").pack(side=LEFT, padx=4, pady=4)
         make_button(content, "撤销上次", self.undo_last_batch, kind="danger").pack(side=LEFT, padx=4, pady=4)
         return row + 1
@@ -720,7 +739,7 @@ class VideoBatchTool:
 
         self.cut_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "视频裁切", "✂️", "cut", enable_var=self.cut_enable,
+            self.main_frame, "视频裁切", "", "cut", enable_var=self.cut_enable,
         )
         self._grid_card(card, row, col)
 
@@ -741,7 +760,7 @@ class VideoBatchTool:
 
         self.audio_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "替换音频", "🔊", "audio", enable_var=self.audio_enable,
+            self.main_frame, "替换音频", "", "audio", enable_var=self.audio_enable,
         )
         self._grid_card(card, row, col)
 
@@ -764,7 +783,7 @@ class VideoBatchTool:
         self.logo_mode = StringVar(value="视频贴图")
 
         card, _hdr, frame = self._module_card(
-            self.main_frame, "叠加层", "🖼️", "layer", enable_var=self.layer_enable,
+            self.main_frame, "叠加层", "", "layer", enable_var=self.layer_enable,
             on_toggle=self._sync_layer_to_legacy,
         )
         self._grid_card(card, row, col, colspan=2)
@@ -951,7 +970,7 @@ class VideoBatchTool:
 
         self.ratio_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "比例适配（背景模糊填充）", "📐", "ratio", enable_var=self.ratio_enable,
+            self.main_frame, "比例适配（背景模糊填充）", "", "ratio", enable_var=self.ratio_enable,
         )
         self._grid_card(card, row, col)
 
@@ -972,7 +991,7 @@ class VideoBatchTool:
 
         self.enable_mov_watermark = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "AE透明MOV循环水印", "💧", "mov_wm", enable_var=self.enable_mov_watermark,
+            self.main_frame, "AE透明MOV循环水印", "", "mov_wm", enable_var=self.enable_mov_watermark,
         )
         self._grid_card(card, row, col)
 
@@ -1024,7 +1043,7 @@ class VideoBatchTool:
 
         self.overlay_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "可视化叠加（底图贴视频 / Logo 预览定位）", "🎨", "overlay",
+            self.main_frame, "可视化叠加（底图贴视频 / Logo 预览定位）", "", "overlay",
             enable_var=self.overlay_enable,
         )
         self._grid_card(card, row, 0, colspan=3)
@@ -1053,7 +1072,7 @@ class VideoBatchTool:
         from modules.ui_skin import setup_log_tags
 
         card, _hdr, frame = self._module_card(
-            self.main_frame, "处理日志", "📋", "log",
+            self.main_frame, "处理日志", "", "log",
         )
         self._grid_card(card, row, 0, colspan=3)
         frame.columnconfigure(0, weight=1)
@@ -1490,13 +1509,13 @@ class VideoBatchTool:
             return
         if st.get("mode") == "free_canvas":
             layers = st.get("layers", {})
-            bg = "底图✅" if layers.get("bg", {}).get("enabled") else "底图❌"
+            bg = "底图" if layers.get("bg", {}).get("enabled") else "底图"
             vid = layers.get("video", {})
             logo = layers.get("logo", {})
             folder = vid.get("folder", "")
             n = len(list_videos_in_folder(folder)) if folder else 0
-            v = "视频✅" if vid.get("enabled") else "视频❌"
-            l = "Logo✅" if logo.get("enabled") else "Logo❌"
+            v = "视频" if vid.get("enabled") else "视频"
+            l = "Logo" if logo.get("enabled") else "Logo"
             short = folder if len(folder) < 40 else "..." + folder[-37:]
             self.overlay_summary.set(
                 f"叠加：{bg} + {v} + {l} | 素材文件夹：{short or '未选'} ({n}个视频)"
@@ -2136,7 +2155,7 @@ class VideoBatchTool:
             self._update_composite_overlay_info()
             if hasattr(self, "_on_logo_mode_change"):
                 self._on_logo_mode_change()
-            self.log("配置已加载")
+            # 面向普通用户：不刷「配置已加载」等技术日志
         except Exception as e:
             self._log_exception("load_config_apply", e)
             self.log(f"加载配置失败: {e}")
@@ -2325,7 +2344,7 @@ class VideoBatchTool:
             return
         name = self._src_files[idx]
         if idx in self._rename_done_src:
-            display, fg, bg = f"✅ {name}", "gray", "#f0f0f0"
+            display, fg, bg = f"{name}", "gray", "#f0f0f0"
         elif idx == self._rename_copied_idx:
             display, fg, bg = name, "black", "#cce5ff"
         else:

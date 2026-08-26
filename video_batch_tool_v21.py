@@ -169,7 +169,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._bind_batch_hotkeys()
         try:
             if hasattr(self, "main_title_label"):
-                self.main_title_label.config(text=f"🎬  {APP_TITLE}")
+                self.main_title_label.config(text=f"{APP_TITLE}")
         except Exception:
             pass
 
@@ -297,7 +297,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         from modules.ui_skin import FONTS, make_button
 
         card, _hdr, content = self._module_card(
-            self.main_frame, "全局输入 / 输出", "📁", "global",
+            self.main_frame, "全局输入 / 输出", "", "global",
         )
         self._grid_card(card, row, 0, colspan=3)
         self._configure_form_grid(content, extra_btn_cols=2)
@@ -332,7 +332,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             row=0, column=3, padx=4, sticky="w")
         hint = ttk.Label(
             name_row,
-            text="💡 如 sample.mp4 + _habi → sample_habi.mp4",
+            text="如 sample.mp4 + _habi → sample_habi.mp4",
             font=FONTS["caption"], foreground="gray",
         )
         hint.grid(row=0, column=4, columnspan=2, sticky="w", padx=(12, 0))
@@ -377,7 +377,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         from modules.ui_skin import make_button, make_checkbutton
 
         card, _hdr, content = self._module_card(
-            self.main_frame, "批处理操作", "🚀", "global",
+            self.main_frame, "批处理操作", "", "global",
         )
         self._grid_card(card, row, 0, colspan=3)
 
@@ -385,11 +385,11 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         bar.pack(fill=X, padx=6, pady=8)
         self.preview_mode_var = StringVar(value="智能")
         specs: list[tuple[str, Any, str] | None] = [
-            ("🚀 开始批量处理", self.start_batch, "success"),
-            ("🎬 试跑预览", self.preview_first_video, "info"),
+            ("开始批量处理", self.start_batch, "success"),
+            ("试跑预览", self.preview_first_video, "info"),
             None,
             ("打开输出", self.open_global_output, "outline"),
-            ("🎵 音频工具箱", self.open_audio_toolbox, "outline"),
+            ("音频工具箱", self.open_audio_toolbox, "outline"),
             ("保存配置", self.save_config, "outline"),
             ("撤销上次", self.undo_last_batch, "danger"),
         ]
@@ -413,7 +413,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     def build_cut_section(self, row, col):
         self.cut_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "视频裁切", "✂️", "cut", enable_var=self.cut_enable,
+            self.main_frame, "视频裁切", "", "cut", enable_var=self.cut_enable,
         )
         self._grid_card(card, row, col)
         self._configure_form_grid(frame)
@@ -519,7 +519,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
     def build_ratio_section(self, row, col):
         self.ratio_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "比例适配（背景模糊填充）", "📐", "ratio", enable_var=self.ratio_enable,
+            self.main_frame, "比例适配（背景模糊填充）", "", "ratio", enable_var=self.ratio_enable,
         )
         self._grid_card(card, row, col)
         self._configure_form_grid(frame)
@@ -542,7 +542,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self.enable_mov_watermark = BooleanVar(value=False)
         self.mov_color_protect = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "AE透明MOV循环水印", "💧", "mov_wm", enable_var=self.enable_mov_watermark,
+            self.main_frame, "AE透明MOV循环水印", "", "mov_wm", enable_var=self.enable_mov_watermark,
         )
         self._grid_card(card, row, col)
         self._configure_form_grid(frame)
@@ -592,7 +592,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
         make_checkbutton(
             frame,
-            text="颜色保护（去发灰/发黑；先缩放再去预乘，略慢但颜色更干净）",
+            text="颜色保护（去发灰/发黑；略慢但仍是秒级）",
             variable=self.mov_color_protect,
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=4, pady=(0, 6))
 
@@ -604,7 +604,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self.audio_path_var = StringVar()
         self.png_wm_enable = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "PNG水印", "🖼️", "audio", enable_var=self.png_wm_enable,
+            self.main_frame, "PNG水印", "", "audio", enable_var=self.png_wm_enable,
         )
         self._grid_card(card, row, col)
         self._configure_form_grid(frame)
@@ -681,9 +681,9 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self.template_combo = ttk.Combobox(tpl, textvariable=self.template_var, width=22, state="readonly")
         self.template_combo.pack(side=LEFT)
         self.template_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_selected_template())
-        make_button(tpl, "🔄", self.refresh_templates, kind="tool", width=3).pack(side=LEFT, padx=2)
-        make_button(tpl, "💾 保存", self.save_as_template, kind="outline", width=8).pack(side=LEFT, padx=2)
-        make_button(tpl, "🗑", self.delete_selected_template, kind="danger", width=3).pack(side=LEFT, padx=2)
+        make_button(tpl, "刷新", self.refresh_templates, kind="tool", width=3).pack(side=LEFT, padx=2)
+        make_button(tpl, "保存", self.save_as_template, kind="outline", width=8).pack(side=LEFT, padx=2)
+        make_button(tpl, "删", self.delete_selected_template, kind="danger", width=3).pack(side=LEFT, padx=2)
 
         self.main_title_label = self._toolbar.winfo_children()[0]
 
@@ -755,18 +755,23 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._main_paned.bind("<Configure>", _sync_log_pane_width, add="+")
 
         def _on_mousewheel(event):
+            from modules.scroll_compat import apply_yview_scroll
+
+            touchpad = bool(getattr(event, "_wb_touchpad", False))
             try:
                 w = self.root.winfo_containing(event.x_root, event.y_root)
                 while w:
                     if hasattr(self, "log_text") and w == self.log_text:
-                        self.log_text.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                        apply_yview_scroll(self.log_text, event, touchpad=touchpad)
                         return "break"
                     w = w.master
             except Exception:
                 pass
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            apply_yview_scroll(self.canvas, event, touchpad=touchpad)
 
-        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        from modules.scroll_compat import bind_scroll_all
+
+        bind_scroll_all(self.root, _on_mousewheel)
         self._main_paned.bind("<ButtonRelease-1>", lambda _e: self._save_log_pane_height())
         self.root.after(350, self._restore_log_pane_height)
 
@@ -810,7 +815,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         hdr = Frame(shell, bg=c["bg"])
         hdr.grid(row=0, column=1, sticky="ew", padx=self._pad["sm"], pady=(self._pad["sm"], 4))
         Label(
-            hdr, text="📋 处理日志", bg=c["bg"], fg=c.get("fg", "#111827"),
+            hdr, text="处理日志", bg=c["bg"], fg=c.get("fg", "#111827"),
             font=("Microsoft YaHei", 11, "bold"),
         ).pack(side=LEFT)
 
@@ -842,7 +847,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._failed_label = ttk.Label(self._log_actions, text="", foreground="#F59E0B")
         self._failed_label.pack(side=LEFT)
         self._copy_failed_btn = make_button(
-            self._log_actions, "📋 复制失败清单", self.copy_failed_list,
+            self._log_actions, "复制失败清单", self.copy_failed_list,
             kind="outline", width=14,
         )
         self._log_actions.grid_remove()
@@ -852,7 +857,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
             self._log_actions.grid_remove()
             return
         n = len(self.failed_files)
-        self._failed_label.config(text=f"⚠️ {n}条视频处理失败")
+        self._failed_label.config(text=f"注意：{n}条视频处理失败")
         self._copy_failed_btn.pack(side=LEFT, padx=8)
         self._log_actions.grid()
 
@@ -877,7 +882,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         body.pack(fill=BOTH, expand=True)
         ttk.Label(
             body,
-            text=f"⚠️ 输出文件夹已有 {count} 个同名文件，将覆盖现有文件。",
+            text=f"注意：输出文件夹已有 {count} 个同名文件，将覆盖现有文件。",
             wraplength=360,
         ).pack(anchor="w", pady=(0, pad))
         btn_row = ttk.Frame(body)
@@ -1186,7 +1191,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         self._init_v20_logo_compat_vars()
 
         card, _hdr, frame = self._module_card(
-            self.main_frame, "浮层落版", "🎬", "layer", enable_var=self.layer_enable,
+            self.main_frame, "浮层落版", "", "layer", enable_var=self.layer_enable,
             on_toggle=self._sync_layer_to_legacy,
         )
         self._grid_card(card, row, col, colspan=1)
@@ -1310,7 +1315,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
         if not hasattr(self, "ending_keep_audio"):
             self.ending_keep_audio = BooleanVar(value=False)
         card, _hdr, frame = self._module_card(
-            self.main_frame, "拼接落版（旧版）", "🔗", "layer_concat",
+            self.main_frame, "拼接落版（旧版）", "", "layer_concat",
             enable_var=self.ending_enable,
         )
         self._grid_card(card, row, col)
@@ -1332,7 +1337,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
 
         tip = ttk.Label(
             frame,
-            text="💡 与左侧「浮层落版」不同：此模式将落版视频拼接到主视频末尾",
+            text="与左侧「浮层落版」不同：此模式将落版视频拼接到主视频末尾",
             font=("", 8), foreground="gray",
         )
         tip.grid(row=4, column=0, columnspan=3, sticky="ew", padx=4, pady=4)
@@ -1970,7 +1975,7 @@ class VideoBatchToolV21(v20.VideoBatchTool):
                 f"拼接落版={self._is_enabled('ending_enable')}"
             )
             if self._is_enabled("enable_mov_watermark") and self._is_enabled("mov_color_protect"):
-                self.log("提示：已开「颜色保护」（先缩放再去预乘，减轻半透明发灰）")
+                self.log("提示：已开「颜色保护」（先缩放再去预乘，颜色更干净，仍保持秒级）")
             self.log("快捷键：空格=暂停/继续 · Esc=停止")
 
             total = len(files)

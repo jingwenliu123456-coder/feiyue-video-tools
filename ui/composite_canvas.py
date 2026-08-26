@@ -44,7 +44,9 @@ class CompositeCanvas(ttk.Frame):
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Double-Button-1>", self._on_double)
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        from modules.scroll_compat import bind_scroll
+
+        bind_scroll(self.canvas, self._on_wheel)
 
         info = ttk.Frame(self)
         info.pack(fill=X, pady=4)
@@ -262,10 +264,17 @@ class CompositeCanvas(ttk.Frame):
     def _on_wheel(self, event):
         if not self._in_overlay(event.x, event.y) and not self._hit_corner(event.x, event.y):
             return
-        delta = 1.05 if event.delta > 0 else 0.95
+        if getattr(event, "_wb_touchpad", False):
+            from modules.scroll_compat import precise_deltas
+            _dx, dy = precise_deltas(event)
+            if not dy:
+                return
+            factor = 1.05 if dy < 0 else 0.95
+        else:
+            factor = 1.05 if event.delta > 0 else 0.95
         x1, y1, x2, y2 = self._overlay_rect
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-        w, h = (x2 - x1) * delta, (y2 - y1) * delta
+        w, h = (x2 - x1) * factor, (y2 - y1) * factor
         self._overlay_rect = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
         self._clamp_overlay()
         self._redraw()

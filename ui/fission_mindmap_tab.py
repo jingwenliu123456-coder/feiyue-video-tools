@@ -658,16 +658,17 @@ class FissionMindmapPanel:
         self._map_paned = paned
         mid = ttk.Frame(paned)
         self._right_outer = tk.Frame(paned, width=240, bg=self.th["bg"])
-        paned.add(left, weight=1)
+        paned.add(left, weight=2)
         paned.add(mid, weight=5)
         paned.add(self._right_outer, weight=1)
         try:
-            paned.pane(left, minsize=300)
+            # 源组设置含多行控件；过窄会被裁切，初始就要够宽
+            paned.pane(left, minsize=320)
             paned.pane(self._right_outer, minsize=200)
         except Exception:
             pass
         try:
-            paned.pane(left, weight=1)
+            paned.pane(left, weight=2)
             paned.pane(mid, weight=5)
             paned.pane(self._right_outer, weight=1)
         except Exception:
@@ -786,7 +787,9 @@ class FissionMindmapPanel:
         self.canvas.bind("<Button-3>", self._on_canvas_right)
         self.canvas.bind("<Motion>", self._on_canvas_motion)
         self.canvas.bind("<Leave>", lambda _e: self._hide_tooltip())
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        from modules.scroll_compat import bind_scroll
+
+        bind_scroll(self.canvas, self._on_wheel)
 
         self._mid_split.add(canvas_wrap, weight=3)
         self._canvas_wrap = canvas_wrap
@@ -969,16 +972,13 @@ class FissionMindmapPanel:
                     except Exception:
                         pass
             try:
-                paned.pane(left, minsize=300 if multi else 240)
-            except Exception:
-                pass
-            try:
                 self.root.after(60, self._apply_map_default_sashes)
+                self.root.after(200, self._apply_map_default_sashes)
             except Exception:
                 pass
 
     def _apply_map_default_sashes(self) -> None:
-        """默认：中间最大；多源时左栏略宽以容纳源组表单。"""
+        """默认：左栏够宽展示源组全部控件，中间画布仍占主视觉。"""
         paned = getattr(self, "_map_paned", None)
         if paned is None:
             return
@@ -989,12 +989,17 @@ class FissionMindmapPanel:
             return
         if w < 500:
             return
-        multi = self._io_mode.get() == "多源"
-        if multi:
-            left_w = max(300, min(400, int(w * 0.28)))
-        else:
-            left_w = max(240, min(320, int(w * 0.22)))
-        right_w = max(230, min(300, int(w * 0.24)))
+        # 多源源组设置需要约 340px+；单源也给足，避免拖放区被裁切
+        try:
+            multi = self._io_mode.get() == "多源"
+        except Exception:
+            multi = False
+        left_min = 340 if multi else 300
+        left_w = max(left_min, min(420, int(w * 0.30)))
+        right_w = max(220, min(300, int(w * 0.22)))
+        # 保证中间至少 360
+        if left_w + right_w + 360 > w:
+            left_w = max(left_min, w - right_w - 360)
         try:
             paned.sashpos(0, left_w)
             paned.sashpos(1, max(left_w + 360, w - right_w))
@@ -1258,7 +1263,7 @@ class FissionMindmapPanel:
         ttk.Label(head, text="① 源素材组", font=("Microsoft YaHei", 10, "bold")).pack(anchor="w")
         ttk.Label(
             head, text="每组：输入 → 预处理(可选) → 勾选方案",
-            foreground="gray", font=("", 8), wraplength=320,
+            foreground="gray", font=("", 8), wraplength=230,
         ).pack(anchor="w")
         btn_row = ttk.Frame(head)
         btn_row.pack(fill=X, pady=(6, 0))
@@ -1444,46 +1449,39 @@ class FissionMindmapPanel:
         pp_mode = StringVar(value=g.preprocess_temp_mode or "自动清理")
         pp_path = StringVar(value=g.preprocess_temp_path or "")
 
-        # ---- 折叠标题行（始终可见）----
+        # ---- 折叠标题（始终可见；纵向分行，窄栏也能看全）----
         head = ttk.Frame(card)
         head.pack(fill=X)
+        head_row1 = ttk.Frame(head)
+        head_row1.pack(fill=X)
         arrow = ui_collapse_chevron(expanded=expanded)
         make_button(
-            head, arrow, lambda i=gid: self._toggle_source_group_expand(i),
+            head_row1, arrow, lambda i=gid: self._toggle_source_group_expand(i),
             kind="outline", width=3,
         ).pack(side=LEFT, padx=(0, 4))
-        self._checkbutton(head, text=f"组{idx + 1}", variable=en_var).pack(side=LEFT)
-        ttk.Entry(head, textvariable=title_var).pack(side=LEFT, fill=X, expand=True, padx=4)
-
+        self._checkbutton(head_row1, text=f"组{idx + 1}", variable=en_var).pack(side=LEFT)
+        ttk.Entry(head_row1, textvariable=title_var, width=10).pack(side=LEFT, fill=X, expand=True, padx=4)
+        head_row2 = ttk.Frame(head)
+        head_row2.pack(fill=X, pady=(2, 0))
         summary_var = StringVar(value="")
-        head_actions = ttk.Frame(card)
-        head_actions.pack(fill=X, pady=(2, 0))
-        if expanded:
-            btn_row = ttk.Frame(head_actions)
-            btn_row.pack(side=RIGHT)
-            make_button(btn_row, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=LEFT, padx=1)
-            make_button(btn_row, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=LEFT, padx=1)
-            make_button(btn_row, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=LEFT, padx=1)
-        else:
-            summary_lbl = ttk.Label(
-                head_actions, textvariable=summary_var, foreground="gray", font=("", 8),
-                wraplength=300, justify="left",
-            )
-            summary_lbl.pack(side=LEFT, fill=X, expand=True, padx=(28, 4))
-            btn_row = ttk.Frame(head_actions)
-            btn_row.pack(side=RIGHT)
-            make_button(btn_row, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=LEFT, padx=1)
-            make_button(btn_row, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=LEFT, padx=1)
-            make_button(btn_row, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=LEFT, padx=1)
+        ttk.Label(
+            head_row2, textvariable=summary_var, foreground="gray", font=("", 8),
+            wraplength=280, justify="left",
+        ).pack(side=LEFT, fill=X, expand=True, padx=(28, 4))
+        act = ttk.Frame(head_row2)
+        act.pack(side=RIGHT)
+        make_button(act, "上移", lambda i=idx: self._move_source_group(i, -1), kind="outline", width=4).pack(side=LEFT, padx=1)
+        make_button(act, "下移", lambda i=idx: self._move_source_group(i, 1), kind="outline", width=4).pack(side=LEFT, padx=1)
+        make_button(act, "删除", lambda i=idx: self._remove_source_group(i), kind="danger", width=4).pack(side=LEFT, padx=1)
         self._hook_folder_drop(head, lambda dirs, g=gid: self._on_folders_dropped(dirs, target_group_id=g))
 
-        body = ttk.Frame(card, padding=(28, 4, 4, 4))
+        body = ttk.Frame(card, padding=(12, 4, 4, 4))
         if expanded:
             body.pack(fill=X)
 
         r1 = ttk.Frame(body)
         r1.pack(fill=X, pady=2)
-        ttk.Label(r1, text="输入").pack(side=LEFT)
+        ttk.Label(r1, text="输入", width=4).pack(side=LEFT)
         ttk.Entry(r1, textvariable=in_var).pack(side=LEFT, fill=X, expand=True, padx=4)
         self._hook_folder_drop(r1, lambda dirs, g=gid: self._on_folders_dropped(dirs, target_group_id=g))
 
@@ -1497,7 +1495,7 @@ class FissionMindmapPanel:
 
         r2 = ttk.Frame(body)
         r2.pack(fill=X, pady=2)
-        ttk.Label(r2, text="输出").pack(side=LEFT)
+        ttk.Label(r2, text="输出", width=4).pack(side=LEFT)
         ttk.Entry(r2, textvariable=out_var).pack(side=LEFT, fill=X, expand=True, padx=4)
 
         def browse_out(v=out_var):
@@ -1506,21 +1504,23 @@ class FissionMindmapPanel:
                 v.set(p)
 
         make_button(r2, "浏览", browse_out, kind="outline", width=5).pack(side=LEFT)
-        ttk.Label(body, text="空=用全局输出根", foreground="gray", font=("", 8)).pack(anchor="w", padx=(28, 0))
+        ttk.Label(
+            body, text="输出留空则使用全局输出根", foreground="gray", font=("", 8),
+        ).pack(anchor="w", padx=28, pady=(0, 2))
 
-        r3 = ttk.Frame(body)
-        r3.pack(fill=X, pady=2)
-        self._checkbutton(r3, text="预处理", variable=pp_en, command=lambda: _refresh_summary()).pack(side=LEFT)
-        pp_tpl_cb = ttk.Combobox(r3, textvariable=pp_tpl, values=tpls, state="readonly")
+        r3a = ttk.Frame(body)
+        r3a.pack(fill=X, pady=2)
+        self._checkbutton(r3a, text="预处理", variable=pp_en, command=lambda: _refresh_summary()).pack(side=LEFT)
+        pp_tpl_cb = ttk.Combobox(r3a, textvariable=pp_tpl, values=tpls, width=14, state="readonly")
         pp_tpl_cb.pack(side=LEFT, fill=X, expand=True, padx=4)
 
         r3b = ttk.Frame(body)
         r3b.pack(fill=X, pady=2)
-        ttk.Label(r3b, text="成品").pack(side=LEFT)
+        ttk.Label(r3b, text="成品", foreground="gray", font=("", 8), width=4).pack(side=LEFT)
         ttk.Combobox(
-            r3b, textvariable=pp_mode, width=10, state="readonly",
+            r3b, textvariable=pp_mode, width=8, state="readonly",
             values=["保留", "指定路径", "自动清理"],
-        ).pack(side=LEFT, padx=4)
+        ).pack(side=LEFT, padx=(0, 4))
         ttk.Entry(r3b, textvariable=pp_path).pack(side=LEFT, fill=X, expand=True, padx=2)
 
         def browse_pp(v=pp_path, m=pp_mode):
@@ -1533,14 +1533,13 @@ class FissionMindmapPanel:
 
         r4 = ttk.Frame(body)
         r4.pack(fill=X, pady=(4, 0))
-        ttk.Label(r4, text="裂变方案").pack(side=LEFT)
+        ttk.Label(r4, text="裂变方案").pack(anchor="w")
         ttk.Label(
-            r4, text="（旧方案默认不勾；新加方案自动勾选）",
-            foreground="gray", font=("", 8), wraplength=280,
-        ).pack(side=LEFT, padx=4, fill=X, expand=True)
+            body, text="旧方案默认不勾；为本组新加方案会自动勾选",
+            foreground="gray", font=("", 8), wraplength=300, justify="left",
+        ).pack(anchor="w", pady=(0, 2))
         cb_host = ttk.Frame(body)
         cb_host.pack(fill=X)
-        cb_host.columnconfigure(0, weight=1)
         selected_names = explicit_branch_selection(
             g.selected_branch_names, branch_names, legacy_empty_means_all=False,
         )
@@ -1549,12 +1548,14 @@ class FissionMindmapPanel:
         if not branch_names:
             ttk.Label(cb_host, text="方案库为空：请先在画布添加方案", foreground="gray").pack(anchor="w")
         else:
-            for bn in branch_names:
+            for i, bn in enumerate(branch_names):
                 bv = tk.BooleanVar(value=(bn in selected))
                 branch_vars[bn] = bv
-                self._checkbutton(cb_host, text=bn, variable=bv, command=lambda: _refresh_summary()).pack(
-                    anchor="w", padx=4, pady=1,
-                )
+                self._checkbutton(
+                    cb_host, text=bn, variable=bv, command=lambda: _refresh_summary(),
+                ).grid(row=i // 2, column=i % 2, sticky="w", padx=4, pady=1)
+            cb_host.columnconfigure(0, weight=1)
+            cb_host.columnconfigure(1, weight=1)
 
         def _refresh_summary(*_a):
             summary_var.set(self._sg_summary_text(
@@ -2699,11 +2700,13 @@ class FissionMindmapPanel:
             self._hide_tooltip()
 
     def _on_wheel(self, event) -> None:
-        if event.state & 0x0001:  # Shift：横向滚动（地铁线路加长时）
-            self.canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
-        else:
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        from modules.scroll_compat import apply_xview_scroll, apply_yview_scroll
 
+        touchpad = bool(getattr(event, "_wb_touchpad", False))
+        if event.state & 0x0001:  # Shift：横向滚动
+            apply_xview_scroll(self.canvas, event, touchpad=touchpad)
+        else:
+            apply_yview_scroll(self.canvas, event, touchpad=touchpad)
     def _on_canvas_press(self, event) -> None:
         x, y = self._canvas_xy(event)
         hit = self._hit_test(x, y)
@@ -3111,7 +3114,7 @@ class FissionMindmapPanel:
             "已载入主页",
             f"方案「{b.branch_name}」已载入视频批处理页。\n"
             f"输入/输出已对齐裂变页：\n输入：{in_dir or '（空）'}\n输出：{out_dir or '（空）'}\n\n"
-            "在主页改完细节后，回到裂变页 → 选中该方案 ✎ →「用主页刷新快照」。",
+            "在主页改完细节后，回到裂变页 → 选中该方案 →「用主页刷新快照」。",
             parent=self.root,
         )
 
@@ -3160,7 +3163,7 @@ class FissionMindmapPanel:
                     self._quick_add_from_template(tn)
 
                 tk.Button(
-                    tpl_host, text=ui_list_item("📋", name), anchor="w", bg=th["bg"], fg=th["text"],
+                    tpl_host, text=ui_list_item("", name), anchor="w", bg=th["bg"], fg=th["text"],
                     relief="flat", cursor="hand2", command=_add_tpl,
                 ).pack(fill=X, pady=1)
 
@@ -3178,7 +3181,7 @@ class FissionMindmapPanel:
                     self._clone_branch_at(idx)
 
                 tk.Button(
-                    br_host, text=f"  📑 {b.branch_name}", anchor="w", bg=th["bg"], fg=th["text"],
+                    br_host, text=f"  {b.branch_name}", anchor="w", bg=th["bg"], fg=th["text"],
                     relief="flat", cursor="hand2", command=_clone,
                 ).pack(fill=X, pady=1)
 
@@ -3203,9 +3206,9 @@ class FissionMindmapPanel:
             self.app._fission_add_from_template()
             self._after_plan_change(select_last=True)
 
-        tk.Button(new_host, text=ui_list_item("📄", "从当前界面复制"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_current).pack(fill=X, pady=1)
-        tk.Button(new_host, text=ui_list_item("📝", "新建空白方案"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_blank).pack(fill=X, pady=1)
-        tk.Button(new_host, text=ui_list_item("📂", "更多模板…"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_more).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("", "从当前界面复制"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_current).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("", "新建空白方案"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_blank).pack(fill=X, pady=1)
+        tk.Button(new_host, text=ui_list_item("", "更多模板…"), anchor="w", bg=th["bg"], fg=th["text"], relief="flat", cursor="hand2", command=go_more).pack(fill=X, pady=1)
 
         pop.update_idletasks()
         pw, ph = pop.winfo_reqwidth(), pop.winfo_reqheight()

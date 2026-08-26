@@ -73,10 +73,34 @@ def _hook_windnd(widget: Any, emit: Callable[[Any], None]) -> bool:
         return False
 
 
+def _ensure_tkdnd(widget: Any) -> bool:
+    """确保根窗口已加载 tkdnd（打包/ttkbootstrap 场景）。"""
+    try:
+        from modules.ui_skin import enable_tk_dnd
+
+        root = widget.winfo_toplevel()
+        return bool(enable_tk_dnd(root))
+    except Exception:
+        pass
+    try:
+        from tkinterdnd2 import TkinterDnD  # type: ignore
+
+        root = widget.winfo_toplevel()
+        if hasattr(TkinterDnD, "require"):
+            TkinterDnD.require(root)
+        else:
+            TkinterDnD._require(root)  # type: ignore[attr-defined]
+        return True
+    except Exception:
+        return False
+
+
 def _hook_tkdnd(widget: Any, emit: Callable[[Any], None]) -> bool:
     global _LAST_BACKEND
     try:
         from tkinterdnd2 import DND_FILES  # type: ignore
+
+        _ensure_tkdnd(widget)
 
         def _tkdnd(event) -> None:
             raw = widget.tk.splitlist(event.data)

@@ -133,6 +133,9 @@ def normalize_date(value: str) -> tuple[str, bool]:
         v = v[:8]
         if v.isdigit():
             return v, True
+    if len(v) == 6 and v.isdigit():
+        # YYMMDD → 20YYMMDD（与「6位」显示对应）
+        return f"20{v}", True
     if len(v) == 4 and v.isdigit():
         year = datetime.now().strftime("%Y")
         return f"{year}{v}", True
@@ -146,6 +149,20 @@ def date_display_4(value: str) -> str:
     if not ok:
         return "0000"
     return v[-4:] if len(v) >= 4 else v
+
+
+def date_display_6(value: str) -> str:
+    """6 位日期：YYMMDD，例如 260826。"""
+    v, ok = normalize_date(value)
+    if not ok:
+        return "000000"
+    return v[-6:] if len(v) >= 6 else v
+
+
+def custom_date_token(value: str) -> str:
+    """自定义日期：原样写入文件名，仅替换非法路径字符。"""
+    raw = (value or "").strip()
+    return WIN_ILLEGAL.sub("_", raw)
 
 
 def format_index(index: int, width: int = 3) -> str:
@@ -225,11 +242,19 @@ def build_filename_from_template(
     type_ = sanitize_no_dash(fields.type_) or "chat"
     size = normalize_size(fields.size)
     designer = sanitize_no_dash(fields.designer) or "ljw"
-    date_full, date_ok = normalize_date(fields.date or today_date_str())
-    if str(date_format) == "4":
-        date_out = date_display_4(fields.date or today_date_str()) if date_ok else "0000"
+    fmt = str(date_format or "8").strip().lower()
+    if fmt in ("custom", "自定义"):
+        # 自定义：不校验位数/格式，用户填什么就用什么
+        date_out = custom_date_token(fields.date)
+        date_ok = True
     else:
-        date_out = date_full if date_ok else INVALID_DATE
+        date_full, date_ok = normalize_date(fields.date or today_date_str())
+        if fmt == "4":
+            date_out = date_display_4(fields.date or today_date_str()) if date_ok else "0000"
+        elif fmt == "6":
+            date_out = date_display_6(fields.date or today_date_str()) if date_ok else "000000"
+        else:
+            date_out = date_full if date_ok else INVALID_DATE
 
     tags = force_tags if force_tags is not None else fields.normalized_tags()
     tag_joined = "-".join(tags) if tags else EMPTY_TAG

@@ -170,7 +170,7 @@ def default_config() -> dict[str, Any]:
         "rules_on_original": False,
         "rename_source": "",
         "rename_target": "",
-        "rename_mode": "replace",
+        "rename_mode": "click",
         "index_digits": 2,
         "date_format": "4",
         "brand_extra": [],
@@ -296,7 +296,7 @@ class NamingToolApp:
         self.legacy_var = tk.BooleanVar(value=False)
         self.rename_source_var = tk.StringVar()
         self.rename_target_var = tk.StringVar()
-        self.rename_mode = tk.StringVar(value="replace")
+        self.rename_mode = tk.StringVar(value="click")
         self.scan_subfolders_var = tk.BooleanVar(value=False)
         self.rules_on_original_var = tk.BooleanVar(value=False)
         self.preview_status_var = tk.StringVar(value="请选择文件夹后点「扫描」")
@@ -350,7 +350,8 @@ class NamingToolApp:
 
     def _init_chrome(self) -> None:
         from modules.ui_skin import (
-            DEFAULT_MODULE_COLORS, UI_THEME_NONE, add_theme_menu, build_status_bar, build_toolbar,
+            DEFAULT_MODULE_COLORS, UI_THEME_NONE, add_theme_menu, attach_theme_toolbar_button,
+            build_status_bar, build_toolbar,
             card_colors, is_light_theme,
         )
         from modules.theme_utils import is_dark_mode
@@ -422,6 +423,12 @@ class NamingToolApp:
             self._schedule_save()
 
         add_theme_menu(self.root, on_change=_on_theme_change, on_save=_save_ui_theme)
+        try:
+            attach_theme_toolbar_button(
+                self._toolbar, self.root, on_change=_on_theme_change, on_save=_save_ui_theme,
+            )
+        except Exception:
+            pass
 
     @staticmethod
     def _hidden_kw() -> dict:
@@ -521,7 +528,7 @@ class NamingToolApp:
         upper.columnconfigure(0, weight=1)
         upper.rowconfigure(4, weight=1)
 
-        folder_card, _, r1 = self._naming_card(upper, "素材文件夹", "📁", "naming_folder")
+        folder_card, _, r1 = self._naming_card(upper, "素材文件夹", "", "naming_folder")
         folder_card.grid(row=0, column=0, sticky="ew", padx=self._pad["sm"], pady=self._pad["sm"])
         r1.columnconfigure(1, weight=1)
         ttk.Label(r1, text="路径:").grid(row=0, column=0, sticky="w")
@@ -549,7 +556,7 @@ class NamingToolApp:
         self._drop_hook_targets.extend([folder_card, r1])
 
         tpl_card, _, r2 = self._naming_card(
-            upper, "命名模板（{序号}位置可编辑，扩展名沿用原文件）", "📝", "naming_template",
+            upper, "命名模板（{序号}位置可编辑，扩展名沿用原文件）", "", "naming_template",
         )
         tpl_card.grid(row=1, column=0, sticky="ew", padx=self._pad["sm"], pady=self._pad["sm"])
         r2.columnconfigure(1, weight=1)
@@ -584,7 +591,7 @@ class NamingToolApp:
         ttk.Label(r2, textvariable=self.full_preview_var, font=FONTS["body"], foreground="gray").grid(
             row=3, column=1, columnspan=2, sticky="w", pady=(8, 0))
 
-        fields_card, _, r3 = self._naming_card(upper, "字段设置", "⚙️", "naming_fields")
+        fields_card, _, r3 = self._naming_card(upper, "字段设置", "", "naming_fields")
         fields_card.grid(row=2, column=0, sticky="ew", padx=self._pad["sm"], pady=self._pad["sm"])
         fields = ttk.Frame(r3)
         fields.pack(fill="x")
@@ -627,10 +634,15 @@ class NamingToolApp:
 
         ttk.Label(fields, text="日期:").pack(side="left", padx=(12, 0))
         ttk.Entry(fields, textvariable=self.date_var, width=10).pack(side="left", padx=2)
-        date_fmt = ttk.Combobox(fields, textvariable=self.date_format_var, width=5, state="readonly", values=["4", "8"])
+        date_fmt = ttk.Combobox(
+            fields, textvariable=self.date_format_var, width=6, state="readonly",
+            values=["4", "6", "8", "自定义"],
+        )
         date_fmt.pack(side="left", padx=2)
-        date_fmt.bind("<<ComboboxSelected>>", lambda e: self._schedule_save())
-        ttk.Label(fields, text="位", font=("", 8), foreground="gray").pack(side="left")
+        date_fmt.bind("<<ComboboxSelected>>", lambda e: self._on_date_format_change())
+        self._date_unit_lbl = ttk.Label(fields, text="位", font=("", 8), foreground="gray")
+        self._date_unit_lbl.pack(side="left")
+        self._refresh_date_unit_label()
 
         ttk.Label(fields, text="设计师:").pack(side="left", padx=(12, 0))
         self.designer_combo = ttk.Combobox(fields, width=6, state="readonly")
@@ -645,7 +657,7 @@ class NamingToolApp:
         self._refresh_all_field_combos()
         self._trace(self.date_var)
 
-        tag_card, _, r4 = self._naming_card(upper, "标签", "🏷️", "naming_tags")
+        tag_card, _, r4 = self._naming_card(upper, "标签", "", "naming_tags")
         tag_card.grid(row=3, column=0, sticky="ew", padx=self._pad["sm"], pady=self._pad["sm"])
         tag_row = ttk.Frame(r4)
         tag_row.pack(fill="x")
@@ -687,7 +699,7 @@ class NamingToolApp:
         make_button(suggest, "编辑常用标签", self._manage_tags_dialog, kind="outline").pack(side="left", padx=2)
 
         preview_card, _, preview_frame = self._naming_card(
-            upper, "规范命名预览", "👁️", "naming_preview", content_fill_both=True,
+            upper, "规范命名预览", "", "naming_preview", content_fill_both=True,
         )
         preview_card.grid(row=4, column=0, sticky="nsew", padx=self._pad["sm"], pady=self._pad["sm"])
         preview_frame.columnconfigure(0, weight=1)
@@ -944,7 +956,7 @@ class NamingToolApp:
                 pass
 
         win = tk.Toplevel(self.root)
-        win.title("对照改名 — 单击复制 · 单击粘贴 · 双击编辑")
+        win.title("对照改名 — 点击替换 · 单击复制/粘贴 · 双击编辑")
         win.geometry("980x560")
         win.minsize(760, 420)
         try:
@@ -1007,7 +1019,7 @@ class NamingToolApp:
         from ui.workbench_skin import make_tk_vscrollbar
 
         card, _, frame = self._naming_card(
-            parent, "源 ↔ 目标对照", "✏️", "naming_batch",
+            parent, "源 ↔ 目标对照", "", "naming_batch",
             content_fill_both=True,
         )
         card.pack(fill=tk.BOTH, expand=True, padx=self._pad["sm"], pady=self._pad["sm"])
@@ -1018,7 +1030,7 @@ class NamingToolApp:
         mode_f = ttk.Frame(frame)
         mode_f.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
         ttk.Label(mode_f, text="模式:").pack(side="left", padx=4)
-        ttk.Radiobutton(mode_f, text="查找替换", variable=self.rename_mode, value="replace",
+        ttk.Radiobutton(mode_f, text="点击替换", variable=self.rename_mode, value="click",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
         ttk.Radiobutton(mode_f, text="附加模式", variable=self.rename_mode, value="append",
                         command=self._on_rename_mode_change).pack(side="left", padx=4)
@@ -1030,7 +1042,7 @@ class NamingToolApp:
 
         ttk.Label(
             mode_f,
-            text=f"{ui_hint_prefix()}查找替换：左栏单击复制文件名 → 右栏单击粘贴替换；附加/高级见各模式说明",
+            text=f"{ui_hint_prefix()}点击替换：左栏单击复制文件名 → 右栏单击粘贴替换；附加/高级见各模式说明",
             font=FONTS["caption"], foreground="gray",
         ).pack(side="left", padx=8)
 
@@ -1226,7 +1238,32 @@ class NamingToolApp:
             return 2
 
     def _date_format(self) -> str:
-        return "8" if self.date_format_var.get() == "8" else "4"
+        raw = (self.date_format_var.get() or "4").strip()
+        if raw in ("自定义", "custom"):
+            return "custom"
+        if raw == "6":
+            return "6"
+        if raw == "8":
+            return "8"
+        return "4"
+
+    def _refresh_date_unit_label(self) -> None:
+        lbl = getattr(self, "_date_unit_lbl", None)
+        if lbl is None:
+            return
+        try:
+            lbl.config(text="" if self._date_format() == "custom" else "位")
+        except tk.TclError:
+            pass
+
+    def _on_date_format_change(self) -> None:
+        self._refresh_date_unit_label()
+        # 切回 4/6/8 位时，空日期补成今日；自定义不覆盖用户填写
+        if self._date_format() != "custom":
+            if not (self.date_var.get() or "").strip():
+                self.date_var.set(today_date_str())
+        self._schedule_save()
+        self._refresh_preview()
 
     def _on_index_digits_change(self) -> None:
         self._schedule_save()
@@ -1759,7 +1796,14 @@ class NamingToolApp:
             self.folder_var.set(cfg.get("folder", ""))
             self.start_var.set(str(cfg.get("start_index", 1)))
             self.index_digits_var.set(str(cfg.get("index_digits", 2)))
-            self.date_format_var.set(str(cfg.get("date_format", "4")))
+            df = str(cfg.get("date_format", "4")).strip()
+            if df in ("custom", "自定义"):
+                self.date_format_var.set("自定义")
+            elif df in ("4", "6", "8"):
+                self.date_format_var.set(df)
+            else:
+                self.date_format_var.set("4")
+            self._refresh_date_unit_label()
             tpl = str(cfg.get("template") or "").strip()
             if tpl:
                 self.middle_var.set(tpl)
@@ -1792,7 +1836,11 @@ class NamingToolApp:
                 self._set_size_ui(str(cfg.get("size_preset", "9x16")), str(cfg.get("size_custom", "")))
             else:
                 self._set_size_ui(str(cfg.get("size", "9x16")), "")
-            self.date_var.set(today_date_str())  # 始终跟系统今日，不沿用配置里的旧日期
+            if self._date_format() == "custom":
+                # 自定义：保留用户上次填的内容，不强制改成今日
+                self.date_var.set(str(cfg.get("date", "") or ""))
+            else:
+                self.date_var.set(today_date_str())  # 4/6/8 位跟系统今日
             self._set_designer_ui(str(cfg.get("designer_preset", "ljw")), str(cfg.get("designer_custom", "")))
             tags = cfg.get("tags", ["", "", ""])
             for i, tv in enumerate(self.tag_vars):
@@ -1831,9 +1879,9 @@ class NamingToolApp:
             self._update_legacy_strip_count()
             self.rename_source_var.set(cfg.get("rename_source", ""))
             self.rename_target_var.set(cfg.get("rename_target", ""))
-            mode = cfg.get("rename_mode", "replace")
-            if mode == "click":
-                mode = "replace"
+            mode = cfg.get("rename_mode", "click")
+            if mode == "replace":
+                mode = "click"
             self.rename_mode.set(mode)
             self.scan_subfolders_var.set(bool(cfg.get("scan_subfolders", False)))
             self.rules_on_original_var.set(bool(cfg.get("rules_on_original", False)))
@@ -1851,7 +1899,9 @@ class NamingToolApp:
         self._update_legacy_strip_visibility()
 
     def sync_today_date(self) -> None:
-        """把日期框刷新为系统今日（嵌入页跨天/再次打开时用）。"""
+        """把日期框刷新为系统今日（嵌入页跨天/再次打开时用）。自定义模式不覆盖。"""
+        if self._date_format() == "custom":
+            return
         today = today_date_str()
         if (self.date_var.get() or "").strip() == today:
             return
@@ -1868,7 +1918,11 @@ class NamingToolApp:
             return 0
 
     def _get_fields(self) -> NamingFields:
-        date, _ = normalize_date(self.date_var.get() or today_date_str())
+        raw_date = (self.date_var.get() or "").strip()
+        if self._date_format() == "custom":
+            date = raw_date  # 自定义：原样使用，不做位数校验
+        else:
+            date, _ = normalize_date(raw_date or today_date_str())
         return NamingFields(
             brand=self._get_brand(),
             lang=self._get_lang(),
@@ -2209,6 +2263,9 @@ class NamingToolApp:
         if field_key == "size":
             return normalize_size(v)
         if field_key == "date":
+            # 自定义日期不剥离非数字；4/6/8 位仍只保留数字
+            if self._date_format() == "custom":
+                return v
             return re.sub(r"\D", "", v)
         if field_key == "designer":
             return sanitize_no_dash(v)
@@ -3217,7 +3274,7 @@ class NamingToolApp:
             messagebox.showwarning("提示", "请选择目标文件夹")
             return
         if self.rename_mode.get() != "append":
-            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n查找替换请使用左栏复制、右栏粘贴。")
+            messagebox.showinfo("提示", "批量附加重命名仅在「附加模式」下可用。\n点击替换请使用左栏复制、右栏粘贴。")
             return
         suffix = simpledialog.askstring("批量附加重命名", "追加到所有文件名末尾的内容:", parent=self.root)
         if not suffix:

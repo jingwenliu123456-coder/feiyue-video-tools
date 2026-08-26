@@ -153,7 +153,7 @@ class OverlayModule(ttk.Frame):
                         command=self._on_layer_toggle).grid(row=4, column=0, columnspan=2, sticky="w")
         ttk.Button(ctrl, text="选择素材文件夹", command=self.load_video_folder).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=1)
-        self.video_folder_info = StringVar(value="📁 未选择")
+        self.video_folder_info = StringVar(value="未选择")
         ttk.Label(ctrl, textvariable=self.video_folder_info, wraplength=200, font=("", 8)).grid(
             row=6, column=0, columnspan=2, sticky="w")
 
@@ -261,7 +261,9 @@ class OverlayModule(ttk.Frame):
         self.canvas.bind("<Button-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        from modules.scroll_compat import bind_scroll
+
+        bind_scroll(self.canvas, self._on_wheel)
         preview_f.bind("<Configure>", self._on_preview_configure)
 
         ttk.Label(preview_f, text="默认一批共用位置；勾选「本视频单独定位」可只改当前条 | 滚轮缩放 | R重置",
@@ -274,18 +276,18 @@ class OverlayModule(ttk.Frame):
         """左侧面板滚轮滚动（递归绑定子控件，不占用 bind_all，以免抢走预览缩放）。"""
 
         def _on_wheel(event):
-            if event.delta:
-                self._ctrl_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            elif getattr(event, "num", None) == 4:
-                self._ctrl_canvas.yview_scroll(-1, "units")
-            elif getattr(event, "num", None) == 5:
-                self._ctrl_canvas.yview_scroll(1, "units")
+            from modules.scroll_compat import apply_yview_scroll
+
+            apply_yview_scroll(
+                self._ctrl_canvas, event,
+                touchpad=bool(getattr(event, "_wb_touchpad", False)),
+            )
             return "break"
 
         def _walk(w):
-            w.bind("<MouseWheel>", _on_wheel)
-            w.bind("<Button-4>", _on_wheel)
-            w.bind("<Button-5>", _on_wheel)
+            from modules.scroll_compat import bind_scroll
+
+            bind_scroll(w, _on_wheel)
             for child in w.winfo_children():
                 _walk(child)
 
@@ -323,7 +325,7 @@ class OverlayModule(ttk.Frame):
         if not self.video_files:
             messagebox.showwarning("提示", "文件夹内没有 .mp4/.mov 视频")
             return
-        self.video_folder_info.set(f"📁 {folder} | 共 {len(self.video_files)} 个视频")
+        self.video_folder_info.set(f"{folder} | 共 {len(self.video_files)} 个视频")
         self.video_preview_idx = 0
         self._load_preview_video(self.video_files[0])
         self._update_preview_label()
@@ -897,9 +899,16 @@ class OverlayModule(ttk.Frame):
             return
         layer = self._selected
         r = self._layer_rects[layer]
-        delta = 1.05 if event.delta > 0 else 0.95
+        if getattr(event, "_wb_touchpad", False):
+            from modules.scroll_compat import precise_deltas
+            _dx, dy = precise_deltas(event)
+            if not dy:
+                return
+            factor = 1.05 if dy < 0 else 0.95
+        else:
+            factor = 1.05 if event.delta > 0 else 0.95
         cx, cy = (r[0] + r[2]) / 2, (r[1] + r[3]) / 2
-        w, h = (r[2] - r[0]) * delta, (r[3] - r[1]) * delta
+        w, h = (r[2] - r[0]) * factor, (r[3] - r[1]) * factor
         self._layer_rects[layer] = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
         self._clamp_rect(layer)
         if layer == "video":
@@ -1103,7 +1112,7 @@ class OverlayModule(ttk.Frame):
         if folder and os.path.isdir(folder):
             self.video_folder = folder
             self.video_files = list_videos_in_folder(folder)
-            self.video_folder_info.set(f"📁 {folder} | 共 {len(self.video_files)} 个视频")
+            self.video_folder_info.set(f"{folder} | 共 {len(self.video_files)} 个视频")
             self.video_preview_idx = min(vid.get("preview_index", 0), max(0, len(self.video_files) - 1))
             if self.video_files:
                 self._load_preview_video(self.video_files[self.video_preview_idx])
@@ -1175,7 +1184,7 @@ class OverlayModule(ttk.Frame):
             parent = str(Path(ap).parent)
             self.video_folder = parent
             self.video_files = list_videos_in_folder(parent)
-            self.video_folder_info.set(f"📁 {parent} | 共 {len(self.video_files)} 个视频")
+            self.video_folder_info.set(f"{parent} | 共 {len(self.video_files)} 个视频")
             try:
                 self.video_preview_idx = self.video_files.index(Path(ap))
             except ValueError:

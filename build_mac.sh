@@ -1,81 +1,84 @@
 #!/usr/bin/env bash
+# V24 macOS 打包（既定规范）：
+# - 文稿构建目录；本地 .venv；单一 onedir 主程序（规范命名已内嵌，不打独立 Naming App）
 set -euo pipefail
 
 cd "$(dirname "$0")"
+ROOT="$(pwd)"
 echo "============================================"
 echo "  飞跃视频批处理工具 V24 - macOS 打包"
+echo "  目录: $ROOT"
 echo "============================================"
 echo
 
-if ! command -v python3 &>/dev/null; then
-  echo "[错误] 未找到 python3，请先安装 Python 3.10+"
+if [[ ! -x "$ROOT/.venv/bin/python" ]]; then
+  echo "[错误] 未找到 .venv"
   exit 1
 fi
+PY="$ROOT/.venv/bin/python"
+export PATH="$ROOT/.venv/bin:$PATH"
 
-echo "[1/5] 检查 PyInstaller / ttkbootstrap..."
-python3 -m pip install -q pyinstaller pillow ttkbootstrap tkinterdnd2 2>/dev/null || \
-  python3 -m pip install pyinstaller pillow tttkbootstrap tkinterdnd2
-if ! python3 -c "import ttkbootstrap" 2>/dev/null; then
-  echo "[错误] 缺少 tttbootstrap，请: python3 -m pip install tttbootstrap"
-  exit 1
-fi
+echo "[1/6] 检查依赖（.venv）..."
+"$PY" -m pip install -q --upgrade pip
+"$PY" -m pip install -q pyinstaller pillow ttkbootstrap tkinterdnd2
+"$PY" - <<'PY'
+import importlib
+for name in ("PyInstaller", "PIL", "ttkbootstrap", "tkinterdnd2"):
+    importlib.import_module(name)
+    print(f"  OK: {name}")
+import tkinter as tk
+print(f"  OK: Tk {tk.TkVersion}")
+from modules.scroll_compat import has_touchpad_scroll, scroll_sequences
+print(f"  OK: touchpad={has_touchpad_scroll()} seq={scroll_sequences()}")
+PY
 
-echo "[2/5] 检查 FFmpeg..."
-if [[ ! -f "ffmpeg_mac" ]]; then
-  echo "[警告] 未找到 ffmpeg_mac — 请先运行 setup_and_build_mac.sh 或 brew install ffmpeg"
-else
-  chmod +x ffmpeg_mac
-  echo "  OK: ffmpeg_mac"
-fi
-if [[ -f "ffprobe_mac" ]]; then
-  chmod +x ffprobe_mac
-  echo "  OK: ffprobe_mac"
-fi
+echo "[2/6] 检查 FFmpeg 副本..."
+[[ -f ffmpeg_mac ]] || { echo "[错误] 缺少 ffmpeg_mac"; exit 1; }
+chmod +x ffmpeg_mac
+[[ -f ffprobe_mac ]] && chmod +x ffprobe_mac
+echo "  OK: ffmpeg_mac"
 
-echo "[2.5/5] 准备 App 图标 (.icns)..."
-if [[ -f "prepare_mac_icons.sh" ]]; then
-  chmod +x prepare_mac_icons.sh
-  ./prepare_mac_icons.sh || true
-fi
+echo "[3/6] 准备 App 图标 (.icns)..."
+[[ -f prepare_mac_icons.sh ]] && chmod +x prepare_mac_icons.sh && ./prepare_mac_icons.sh || true
 
-echo "[3/5] 开始打包 V24 工作台 + 命名工具..."
-python3 -m PyInstaller --noconfirm --clean video_batch_tool_v24_mac_main.spec
-python3 -m PyInstaller --noconfirm --clean naming_tool_mac.spec
+echo "[4/6] PyInstaller onedir（飞跃视频工具.app）..."
+"$PY" -m PyInstaller --noconfirm --clean video_batch_tool_v24_mac.spec
 
-echo "[4/5] 整理发布目录..."
+echo "[5/6] 整理发布目录..."
 RELEASE="dist/HabiVideoTool_macOS"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"
-cp -R "dist/HabiVideoTool.app" "$RELEASE/"
-cp -R "dist/HabiNamingTool.app" "$RELEASE/"
-if [[ -f "setup_subtitle_env_mac.sh" ]]; then
-  cp "setup_subtitle_env_mac.sh" "$RELEASE/"
-  chmod +x "$RELEASE/setup_subtitle_env_mac.sh"
-fi
-if [[ -f "给Mac同事-打包与使用说明.md" ]]; then
-  cp "给Mac同事-打包与使用说明.md" "$RELEASE/"
-fi
-if [[ -d "templates" ]]; then
+APP_SRC=""
+for candidate in "dist/飞跃视频工具.app" "dist/HabiVideoTool.app"; do
+  if [[ -d "$candidate" ]]; then
+    APP_SRC="$candidate"
+    break
+  fi
+done
+[[ -n "$APP_SRC" ]] || { echo "[错误] 未找到 dist/*.app"; ls -la dist; exit 1; }
+res="$APP_SRC/Contents/Resources"
+[[ -d "$res/_tcl_data" ]] || echo "[警告] 缺少 Resources/_tcl_data"
+[[ -d "$res/_tk_data" ]] || echo "[警告] 缺少 Resources/_tk_data"
+rm -rf dist/HabiNamingTool.app dist/HabiNamingTool 2>/dev/null || true
+# 统一发布名为「飞跃视频工具.app」
+cp -R "$APP_SRC" "$RELEASE/飞跃视频工具.app"
+# 兼容旧路径：同级再放一份 HabiVideoTool.app 符号链接可选——按用户要求只保留中文名
+[[ -f setup_subtitle_env_mac.sh ]] && cp setup_subtitle_env_mac.sh "$RELEASE/" && chmod +x "$RELEASE/setup_subtitle_env_mac.sh"
+[[ -f 给Mac同事-打包与使用说明.md ]] && cp 给Mac同事-打包与使用说明.md "$RELEASE/"
+[[ -f README_使用说明.txt ]] && cp README_使用说明.txt "$RELEASE/"
+[[ -f 字幕环境-给同事.txt ]] && cp 字幕环境-给同事.txt "$RELEASE/"
+if [[ -d templates ]]; then
   mkdir -p "$RELEASE/templates"
   cp templates/*.json "$RELEASE/templates/" 2>/dev/null || true
-  echo "  OK: templates/"
-fi
-if [[ -f "README_使用说明.txt" ]]; then
-  cp "README_使用说明.txt" "$RELEASE/"
 fi
 
-echo "[5/5] 去除隔离属性（本机测试用）..."
-xattr -cr "$RELEASE/HabiVideoTool.app" 2>/dev/null || true
-xattr -cr "$RELEASE/HabiNamingTool.app" 2>/dev/null || true
+echo "[6/6] xattr + ad-hoc codesign..."
+xattr -cr "$RELEASE" 2>/dev/null || true
+codesign --force --deep -s - "$RELEASE/飞跃视频工具.app" 2>/dev/null || true
 
 echo
 echo "============================================"
-echo "  打包完成！"
-echo "  发布文件夹: $(pwd)/$RELEASE"
-echo "  - HabiVideoTool.app      V24 工作台（批处理/命名/裂变/字幕SRT）"
-echo "  - HabiNamingTool.app     独立规范命名"
-echo
-echo "  字幕 Whisper：在发布目录执行 ./setup_subtitle_env_mac.sh"
-echo "  发给同事: 将 HabiVideoTool_macOS 文件夹打成 zip"
-echo "  首次打开: 右键 App -> 打开 -> 打开"
+echo "  打包完成（单 App）"
+echo "  $ROOT/$RELEASE/飞跃视频工具.app"
+echo "  内含：批处理 / 规范命名 / 裂变 / 字幕"
 echo "============================================"

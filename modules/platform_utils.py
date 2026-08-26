@@ -18,15 +18,51 @@ def is_mac() -> bool:
 
 
 def use_ui_emoji() -> bool:
-    """macOS 彩色 Emoji 与桌面风格冲突；界面装饰符号仅 Windows 保留。"""
-    return not is_mac()
+    """界面不再使用装饰性 Emoji（各平台统一关闭）。"""
+    return False
+
+
+_EMOJI_RE = None
+
+
+def _emoji_pattern():
+    global _EMOJI_RE
+    if _EMOJI_RE is None:
+        import re
+
+        # 仅去掉常见装饰 Emoji；勿用过宽 Unicode 区间，以免误伤中文
+        _EMOJI_RE = re.compile(
+            "["
+            "\U0001F300-\U0001F5FF"  # Misc Symbols and Pictographs
+            "\U0001F600-\U0001F64F"  # Emoticons
+            "\U0001F680-\U0001F6FF"  # Transport
+            "\U0001F900-\U0001F9FF"  # Supplemental Symbols
+            "\U0001FA00-\U0001FAFF"  # Extended-A
+            "\U0001F1E0-\U0001F1FF"  # Flags
+            "\U00002600-\U000026FF"  # Misc symbols (⚠☀ etc.)
+            "\U00002702-\U000027B0"  # Dingbats subset
+            "\U0000FE0F"            # VS16
+            "]+",
+            flags=re.UNICODE,
+        )
+    return _EMOJI_RE
+
+
+def strip_ui_emoji(text: str) -> str:
+    """去掉 UI 文案里的装饰 Emoji，压缩多余空格。"""
+    if not text:
+        return text
+    try:
+        cleaned = _emoji_pattern().sub("", str(text))
+    except Exception:
+        return str(text)
+    cleaned = " ".join(cleaned.split())
+    return cleaned
 
 
 def ui_decorative_icon(icon: str) -> str:
-    """卡片标题前缀：Mac 返回空，靠色条区分模块。"""
-    if not icon or is_mac():
-        return ""
-    return icon.strip()
+    """卡片标题前缀：不再显示 Emoji，靠色条区分模块。"""
+    return ""
 
 
 def ui_pause_label(*, paused: bool, compact: bool = False) -> str:
@@ -146,16 +182,19 @@ def resolve_subprocess_cwd(explicit: str | Path | None = None) -> str | None:
 
 
 def merge_subprocess_kwargs(user_kwargs: dict | None = None) -> dict:
-    """合并 silent 默认项；不覆盖调用方已显式传入的参数。"""
+    """合并 silent 默认项；不覆盖调用方已显式传入的参数。
+
+    注意：不要在这里默认塞 stdout/stderr。调用方若写成
+    ``subprocess.run(..., stdout=PIPE, **merge_subprocess_kwargs({}))``
+    会与默认 PIPE 冲突（multiple values for keyword argument 'stdout'）。
+    需要管道时请放进 user_kwargs，或由调用方显式传入。
+    """
     merged = dict(user_kwargs or {})
     for key, val in silent_subprocess_kwargs().items():
         if key == "creationflags":
             merged[key] = int(merged.get(key, 0)) | int(val)
         else:
             merged.setdefault(key, val)
-    if SYSTEM == "Darwin":
-        merged.setdefault("stdout", subprocess.PIPE)
-        merged.setdefault("stderr", subprocess.PIPE)
     if merged.get("cwd") is None:
         cwd = resolve_subprocess_cwd()
         if cwd:

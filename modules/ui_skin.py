@@ -207,9 +207,20 @@ def bind_mousewheel(widget: tk.Canvas, *, root: Optional[Any] = None) -> None:
         elif getattr(event, "num", None) == 5:
             widget.yview_scroll(1, "units")
 
-    widget.bind("<MouseWheel>", _on_wheel, add="+")
-    widget.bind("<Button-4>", _on_wheel, add="+")
-    widget.bind("<Button-5>", _on_wheel, add="+")
+    try:
+        from modules.scroll_compat import apply_yview_scroll, bind_scroll
+
+        def _on_wheel(event):  # noqa: F811
+            apply_yview_scroll(
+                widget, event,
+                touchpad=bool(getattr(event, "_wb_touchpad", False)),
+            )
+
+        bind_scroll(widget, _on_wheel, add="+")
+    except Exception:
+        widget.bind("<MouseWheel>", _on_wheel, add="+")
+        widget.bind("<Button-4>", _on_wheel, add="+")
+        widget.bind("<Button-5>", _on_wheel, add="+")
 
 
 def make_scrollable_frame(parent, *, bg: Optional[str] = None) -> tuple[tk.Canvas, ttk.Frame, ttk.Frame]:
@@ -244,10 +255,56 @@ def is_bootstrap_window(root: Any) -> bool:
     return "ttkbootstrap" in mod or cls == "Window"
 
 
+def ensure_bootstrap_themes(root: Any = None) -> None:
+    """ttkbootstrap 2.x 需安装 legacy 主题，否则 darkly 等不可用。"""
+    try:
+        from ttkbootstrap import install_legacy_themes  # type: ignore
+
+        install_legacy_themes()
+    except Exception:
+        pass
+    if root is None:
+        return
+    try:
+        style = getattr(root, "style", None)
+        if style is not None:
+            from ttkbootstrap import install_legacy_themes  # type: ignore
+
+            install_legacy_themes(style)
+    except Exception:
+        pass
+
+
+def _make_plain_tk():
+    """优先 TkinterDnD.Tk，保证 macOS/打包后可拖入文件夹。"""
+    try:
+        from tkinterdnd2 import TkinterDnD  # type: ignore
+
+        return TkinterDnD.Tk()
+    except Exception:
+        return tk.Tk()
+
+
+def enable_tk_dnd(root: Any) -> bool:
+    """向已有 Tk/ttkbootstrap.Window 注入 tkdnd。"""
+    if root is None:
+        return False
+    try:
+        from tkinterdnd2 import TkinterDnD  # type: ignore
+
+        if hasattr(TkinterDnD, "require"):
+            TkinterDnD.require(root)
+        else:
+            TkinterDnD._require(root)  # type: ignore[attr-defined]
+        return True
+    except Exception:
+        return False
+
+
 def create_window(*, title: str = "", themename: str = "darkly", use_bootstrap: bool = True):
     """返回 root；use_bootstrap=False 时为纯 tk（经典皮肤）。"""
     if not use_bootstrap:
-        root = tk.Tk()
+        root = _make_plain_tk()
         root._bootstrap_theme = None  # noqa: SLF001
         root._ui_theme = UI_THEME_NONE  # noqa: SLF001
         if title:
@@ -259,11 +316,19 @@ def create_window(*, title: str = "", themename: str = "darkly", use_bootstrap: 
     try:
         import ttkbootstrap as tb  # type: ignore
 
+        ensure_bootstrap_themes()
         root = tb.Window(themename=themename)
+        ensure_bootstrap_themes(root)
+        try:
+            if themename and themename != UI_THEME_NONE:
+                root.style.theme_use(themename)
+        except Exception:
+            pass
         root._bootstrap_theme = themename  # noqa: SLF001
         root._ui_theme = themename  # noqa: SLF001
+        enable_tk_dnd(root)
     except Exception:
-        root = tk.Tk()
+        root = _make_plain_tk()
         root._bootstrap_theme = None  # noqa: SLF001
         root._ui_theme = UI_THEME_NONE  # noqa: SLF001
     if title:
@@ -314,6 +379,12 @@ def make_button(parent, text: str, command=None, *, kind: str = "default", width
     opts = dict(kw)
     if width is not None:
         opts["width"] = width
+    try:
+        from modules.platform_utils import strip_ui_emoji
+
+        text = strip_ui_emoji(text)
+    except Exception:
+        pass
     try:
         return ttk.Button(parent, text=text, command=command, bootstyle=boot, **opts)
     except tk.TclError:
@@ -565,11 +636,11 @@ def build_toolbar(parent, title: str, *, colors: Optional[dict[str, str]] = None
     bar = tk.Frame(parent, bg=c["toolbar"], height=48)
     bar.pack_propagate(False)
     try:
-        from modules.platform_utils import use_ui_emoji
+        from modules.platform_utils import strip_ui_emoji
 
-        title_text = f"🎬  {title}" if use_ui_emoji() else title
+        title_text = strip_ui_emoji(title)
     except Exception:
-        title_text = f"🎬  {title}"
+        title_text = title
     tk.Label(
         bar,
         text=title_text,
@@ -635,6 +706,7 @@ def add_theme_menu(
         def _apply_bootstrap(name: str) -> None:
             var.set(name)
             try:
+                ensure_bootstrap_themes(root)
                 root.style.theme_use(name)
                 root._bootstrap_theme = name  # noqa: SLF001
             except Exception:
@@ -663,3 +735,66 @@ def add_theme_menu(
         root.config(menu=menubar)
     except Exception:
         pass
+
+
+def attach_theme_toolbar_button(
+    parent,
+    root,
+    *,
+    on_change: Optional[Callable[[str], None]] = None,
+    on_save: Optional[Callable[[str], None]] = None,
+    side: str = tk.LEFT,
+) -> Any:
+    """工具栏「主题」按钮（macOS 菜单栏不好找时用）。"""
+    ensure_bootstrap_themes(root)
+    cur = getattr(root, "_ui_theme", None) or getattr(root, "_bootstrap_theme", None) or "darkly"
+    var = tk.StringVar(value=str(cur))
+
+    def _persist(name: str) -> None:
+        root._ui_theme = name  # noqa: SLF001
+        if on_save:
+            on_save(name)
+
+    def _apply_none() -> None:
+        var.set(UI_THEME_NONE)
+        _persist(UI_THEME_NONE)
+        if on_change:
+            on_change(UI_THEME_NONE)
+
+    def _apply_bootstrap(name: str) -> None:
+        var.set(name)
+        try:
+            root.style.theme_use(name)
+            root._bootstrap_theme = name  # noqa: SLF001
+        except Exception:
+            pass
+        _persist(name)
+        if on_change:
+            on_change(name)
+
+    menu = tk.Menu(parent, tearoff=0)
+    menu.add_radiobutton(
+        label=UI_THEME_NONE_LABEL,
+        variable=var,
+        value=UI_THEME_NONE,
+        command=_apply_none,
+    )
+    menu.add_separator()
+    for name in THEME_NAMES:
+        zh = THEME_LABELS_ZH.get(name, name)
+        menu.add_radiobutton(
+            label=zh,
+            variable=var,
+            value=name,
+            command=lambda n=name: _apply_bootstrap(n),
+        )
+
+    def _popup(event=None):
+        try:
+            menu.tk_popup(parent.winfo_pointerx(), parent.winfo_pointery())
+        finally:
+            menu.grab_release()
+
+    btn = make_button(parent, "主题", _popup, kind="outline", width=7)
+    btn.pack(side=side, padx=(0, 4))
+    return btn

@@ -963,20 +963,39 @@ def _ensure_root_wheel_router(root: tk.Misc) -> None:
                 return "break"
         return None
 
+    def _global_touchpad(event) -> str | None:
+        # 标记触控板事件，供 _scroll_wheel_step 解码 precise deltas
+        try:
+            event._wb_touchpad = True  # noqa: SLF001
+        except Exception:
+            pass
+        return _global_wheel(event)
+
+    from modules.scroll_compat import TOUCHPAD_SCROLL, has_touchpad_scroll
+
     root.bind_all("<MouseWheel>", _global_wheel, add="+")
     root.bind_all("<Button-4>", _global_wheel, add="+")
     root.bind_all("<Button-5>", _global_wheel, add="+")
+    if has_touchpad_scroll():
+        try:
+            root.bind_all(TOUCHPAD_SCROLL, _global_touchpad, add="+")
+        except tk.TclError:
+            pass
 
 
 def _scroll_wheel_step(widget, event) -> None:
-    delta = getattr(event, "delta", 0)
-    if delta:
-        widget.yview_scroll(int(-1 * (delta / 120)), "units")
-    elif getattr(event, "num", None) == 4:
-        widget.yview_scroll(-1, "units")
-    elif getattr(event, "num", None) == 5:
-        widget.yview_scroll(1, "units")
+    from modules.scroll_compat import apply_xview_scroll, apply_yview_scroll
 
+    touchpad = bool(getattr(event, "_wb_touchpad", False))
+    # Shift → 横向
+    try:
+        state = int(getattr(event, "state", 0) or 0)
+    except Exception:
+        state = 0
+    if state & 0x0001:
+        apply_xview_scroll(widget, event, touchpad=touchpad)
+    else:
+        apply_yview_scroll(widget, event, touchpad=touchpad)
 
 def _scrollable_treeview(tv: ttk.Treeview) -> bool:
     """Treeview 内容超出可见行时才独占滚轮，否则交给外层滚动区。"""

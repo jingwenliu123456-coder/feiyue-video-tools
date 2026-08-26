@@ -81,6 +81,7 @@ def _wm_color_protect_chain() -> str:
     去预乘以减轻半透明发灰/发黑。
 
     必须接在 scale 之后：先缩到画面尺寸再 geq（原生 unpremultiply 对这套 AE MOV 不够干净）。
+    配合 overlay shortest=1 后，10 秒片约几秒级，不会再拖成几分钟。
     """
     return (
         ",geq="

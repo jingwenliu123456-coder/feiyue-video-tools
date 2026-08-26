@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,8 +47,6 @@ def resolve_whisper_python() -> str:
 
         root = app_dir()
     except Exception:
-        import sys
-
         return sys.executable
 
     if SYSTEM == "Windows":
@@ -74,9 +73,11 @@ def resolve_whisper_python() -> str:
                 pass
     for p in candidates:
         if p.is_file():
+            from modules.platform_utils import resolve_console_free_python
+
             return resolve_console_free_python(str(p))
 
-    import sys
+    from modules.platform_utils import resolve_console_free_python
 
     return resolve_console_free_python(sys.executable)
 

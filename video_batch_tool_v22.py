@@ -82,13 +82,12 @@ class VideoBatchToolV22(_V21):
         self._preview_zoom_dialog = None
         self._load_v22_layout_from_config()  # build_ui 前加载，重启后布局才生效
         super().__init__(root)
-        if not getattr(root, "_habi_workbench_v24", False):
-            try:
-                self.root.title(APP_TITLE)
-                if hasattr(self, "main_title_label"):
-                    self.main_title_label.config(text=f"🎬  {APP_TITLE}")
-            except Exception:
-                pass
+        try:
+            self.root.title(APP_TITLE)
+            if hasattr(self, "main_title_label"):
+                self.main_title_label.config(text=f"🎬  {APP_TITLE}")
+        except Exception:
+            pass
         self._hook_preview_refresh_traces()
         self.root.after(1200, self._maybe_show_annual_report)
         self.root.after(500, self._scroll_to_preview_module)

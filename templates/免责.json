@@ -1,6 +1,6 @@
 {
-  "global_input": "D:/需求/20260713sami待修改素材/中台KOL素材/bug",
-  "global_output": "D:/需求/20260713sami待修改素材/中台KOL素材/1-水印icon结尾",
+  "global_input": "",
+  "global_output": "",
   "output_mode": "keep",
   "output_suffix": "",
   "cut_enable": false,
@@ -9,8 +9,8 @@
   "cut_end": "00:15",
   "audio_enable": false,
   "audio_path": "",
-  "ending_enable": true,
-  "ending_file": "D:/samilogo片尾/916sami短.mp4",
+  "ending_enable": false,
+  "ending_file": "D:/logo/habi-游戏片尾.mp4",
   "ending_keep_audio": true,
   "ending_trim": "2.3",
   "logo_enable": false,
@@ -32,10 +32,10 @@
   "composite_w": "0",
   "composite_h": "0",
   "ratio_enable": false,
-  "ratio_target": "1:1",
+  "ratio_target": "4:5",
   "ratio_blur_strength": "20",
   "enable_mov_watermark": true,
-  "mov_watermark_path": "D:/habi资产库/Sami-logo.mov",
+  "mov_watermark_path": "D:/samilogo片尾/In game rewards are not real money.mov",
   "mov_watermark_x": "0",
   "mov_watermark_y": "0",
   "mov_watermark_w": "0",
@@ -49,39 +49,47 @@
     "adapt_duration": true,
     "layers": {
       "bg": {
-        "enabled": false,
-        "path": "",
+        "enabled": true,
+        "path": "D:\\其他素材\\改版\\Sami包边-11.png",
         "x": 0,
         "y": 0
       },
       "video": {
         "enabled": true,
-        "folder": "D:/需求/20260713sami待修改素材/中台KOL素材/Habi——中台阿拉伯美女库",
+        "folder": "D:/需求/20260715左下角主播右下角海报上面语音房礼物/包装/sami-tr",
         "preview_index": 0,
-        "scale": 131,
+        "scale": 84,
         "position": {
-          "x": 524,
+          "x": 0,
           "y": 0,
-          "w": 756,
-          "h": 1076
+          "w": 605,
+          "h": 1080
         }
       },
       "logo": {
-        "enabled": true,
+        "enabled": false,
         "path": "D:\\samilogo片尾\\Frame 1.png",
         "scale": 30,
         "position": {
-          "x": 796,
-          "y": 752,
-          "w": 184,
-          "h": 184
-        }
+          "x": 0,
+          "y": 0,
+          "w": 0,
+          "h": 0
+        },
+        "user_placed": true,
+        "default_norm": [
+          0.4083333333333333,
+          0.6916666666666667,
+          0.09166666666666666,
+          1.0
+        ],
+        "overrides": {}
       }
     },
     "start_sec": 0.0,
-    "end_sec": 15.17,
-    "duration_sec": 15.17,
-    "base_w": 1920,
+    "end_sec": 45.1,
+    "duration_sec": 45.1,
+    "base_w": 1080,
     "base_h": 1080
   },
   "module_colors": {
@@ -103,5 +111,25 @@
     "naming_batch": "#EF4444"
   },
   "layer_type": "浮层落版",
-  "layer_enable": false
+  "layer_enable": false,
+  "cut_range_mode": "末尾N秒",
+  "cut_tail_sec": "5",
+  "overlay_custom_x": "0",
+  "overlay_custom_y": "0",
+  "enhance_enable": false,
+  "enhance_mode": "锐化降噪",
+  "png_wm_enable": false,
+  "png_wm_path": "D:/samilogo片尾/not real money.png",
+  "png_wm_mode": "fullscreen",
+  "png_wm_position": "居中",
+  "png_wm_x": "200",
+  "png_wm_y": "650",
+  "png_wm_w": "",
+  "png_wm_h": "0",
+  "png_wm_time_mode": "全程",
+  "png_wm_time_start": "0",
+  "png_wm_time_end": "5",
+  "mov_color_protect": false,
+  "ending_concat_trim": "0",
+  "overlay_keep_audio": true
 }

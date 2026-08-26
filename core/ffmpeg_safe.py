@@ -55,6 +55,9 @@ def _hidden_popen_kwargs(creationflags: int | None = None) -> dict:
     from modules.platform_utils import merge_subprocess_kwargs
 
     kw = merge_subprocess_kwargs({})
+    # 调用方会显式传 stdout/stderr；避免 duplicate keyword
+    kw.pop("stdout", None)
+    kw.pop("stderr", None)
     if creationflags is not None:
         kw["creationflags"] = int(kw.get("creationflags", 0)) | int(creationflags)
     return kw
