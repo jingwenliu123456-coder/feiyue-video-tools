@@ -8,7 +8,7 @@
 
 | 平台 | 文件 | 说明 |
 |------|------|------|
-| macOS（M 系列） | `HabiVideoTool_macOS.zip` | Apple Silicon（M1/M2/M3/M4 等） |
+| macOS（M 系列） | `飞跃视频工具_macOS.zip` | Apple Silicon（M1/M2/M3/M4 等） |
 
 ### macOS 安装
 

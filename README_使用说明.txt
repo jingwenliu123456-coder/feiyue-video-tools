@@ -2,7 +2,7 @@
 ====================================
 
 【下载】
-  GitHub → Releases → 下载 HabiVideoTool_macOS.zip（Mac）
+  GitHub → Releases → 下载 飞跃视频工具_macOS.zip（Mac）
 
 【macOS】
   解压后右键「飞跃视频工具.app」→ 打开 → 打开
